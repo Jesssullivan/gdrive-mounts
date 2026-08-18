@@ -2,6 +2,7 @@
 bazel-*
 result
 result-*
+MODULE.bazel.lock
 
 # direnv
 .direnv/
@@ -10,6 +11,13 @@ result-*
 rendered/
 *.rendered.conf
 rclone.conf
+rclone-*.conf
+
+# Secret staging (import-client/mint-token/seed-lab intermediate artifacts —
+# normally under $XDG_STATE_HOME/gdrive-mounts/stage, never in-repo, but a
+# local/relative GDM_STAGE override during dev must never get committed).
+stage/
+**/stage/
 
 # OS noise
 .DS_Store

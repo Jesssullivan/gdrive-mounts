@@ -4,6 +4,21 @@ common --noenable_workspace
 build --verbose_failures
 test --test_output=errors
 
+# The sh_test targets in BUILD.bazel exec scripts/*.sh, which require jq,
+# rclone, gitleaks, and check-jsonschema on PATH — none of them are Bazel
+# toolchains, they come from the flake devShell (see BUILD.bazel's
+# docstring). Forward the invoking shell's PATH into the test's runtime
+# environment so `nix develop --command bazelisk test //...` (i.e.
+# `just bazel-test`) finds them; a bare `bazel test` outside the devShell
+# will fail closed, which is the intended behavior, not a bug. Also forward
+# HOME: the scripts fall back to `$HOME/.local/state/...` under `set -u`
+# when XDG_STATE_HOME/XDG_RUNTIME_DIR are unset (the sandboxed test runtime
+# has neither), and an unset HOME trips `set -u` before that fallback ever
+# resolves — verified by running `bazel test //:validate_test` without this
+# line (fails: "HOME: unbound variable") and with it (passes).
+test --test_env=PATH
+test --test_env=HOME
+
 # Endpoint doctrine: NEVER put --remote_cache, --remote_executor, credentials,
 # or auth headers in checked-in rc files. If GloriousFlywheel cache enrollment
 # is ratified later, endpoints arrive via runtime env only (BAZEL_REMOTE_CACHE
