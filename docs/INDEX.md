@@ -12,4 +12,3 @@
 | `docs/STYLE.md` | Pointer to `lab`'s writing standard |
 | `docs/evidence/README.md` | What counts as evidence here and how to name it |
 | `docs/evidence/TEMPLATE-mount-bakeoff.md` | The mount-backend bakeoff evidence template |
-| `docs/linear-drafts/issues.md` | The original 8 draft issues — superseded by `docs/tracker.md` once filed |
