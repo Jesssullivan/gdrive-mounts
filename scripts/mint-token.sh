@@ -114,8 +114,23 @@ if ! rclone authorize "drive" "$blob" --auth-no-open-browser >"$tmp/out"; then
 fi
 
 sed -n '/Paste the following into your remote machine/,/<---End paste/p' "$tmp/out" |
-  sed -e '1d' -e '$d' >"$tmp/token.json"
-[ -s "$tmp/token.json" ] || die "no token block between the paste markers (rclone output shape changed?)"
+  sed -e '1d' -e '$d' | tr -d '[:space:]' >"$tmp/block"
+[ -s "$tmp/block" ] || die "no token block between the paste markers (rclone output shape changed?)"
+
+# Two shapes come back. The legacy two-argument form prints the token JSON
+# itself. The blob form (what we use, so the scope survives) prints a
+# base64 "config token": a JSON config map whose `token` field is the token
+# JSON as a string. Accept both; keep the decoded map inside the 0700 tmpdir
+# only — it carries the client secret.
+if jq -e . "$tmp/block" >/dev/null 2>&1; then
+  cp "$tmp/block" "$tmp/token.json"
+elif base64 -d "$tmp/block" >"$tmp/map.json" 2>/dev/null && jq -e 'has("token")' "$tmp/map.json" >/dev/null 2>&1; then
+  jq -c 'if (.token | type) == "string" then (.token | fromjson) else .token end' "$tmp/map.json" >"$tmp/token.json" ||
+    die "config token carries an unreadable token field"
+  rm -f "$tmp/map.json"
+else
+  die "token block is neither token JSON nor a base64 config token (rclone output shape changed?)"
+fi
 assert_json "$tmp/token.json" "minted token"
 jq -e 'has("access_token") and has("refresh_token")' "$tmp/token.json" >/dev/null ||
   die "minted token carries no refresh_token; consent did not complete"

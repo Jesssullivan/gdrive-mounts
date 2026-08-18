@@ -220,10 +220,14 @@ install_secret_file() {
 
 # 12-hex sha256 prefix of stdin. Never prints the value.
 redact() {
-  if command -v sha256sum >/dev/null 2>&1; then
+  # bazelisk ships its own `sha256sum <file>` helper that can shadow GNU's on
+  # PATH, so require the GNU one explicitly, then fall back to shasum/openssl.
+  if sha256sum --version 2>/dev/null | grep -q 'GNU coreutils'; then
     sha256sum | cut -c1-12
   elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 | cut -c1-12
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | sed 's/.*= //' | cut -c1-12
   else
     cat >/dev/null
     printf 'unavailable'
