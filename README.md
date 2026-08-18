@@ -5,7 +5,7 @@ indexable remote filesystems — macOS (kext-free NFS loopback) and Linux
 (FUSE3) — via rclone, delivered by a nix flake and deployed through
 home-manager (`lab`).
 
-Private repo. MIT © 2026 Jess Sullivan.
+Public repo (visibility flipped 2026-08-18 so `lab` CI can fetch it as a flake input). MIT © 2026 Jess Sullivan. It holds no secret material by design — see `docs/sops-integration.md`.
 
 ## Quickstart
 
