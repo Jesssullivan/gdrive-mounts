@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Jesssullivan/gdrive-mounts/config/orgs.schema.json",
   "title": "gdrive-mounts org registry",
+  "description": "Non-secret registry of Google Workspace orgs and their mounts. Owns every runtime default: the home-manager module reads `defaults` as its option defaults, so a knob changed here changes the mount.",
   "type": "object",
   "required": ["schema_version", "defaults", "orgs"],
   "additionalProperties": false,
@@ -9,15 +10,49 @@
     "schema_version": { "const": 1 },
     "defaults": {
       "type": "object",
-      "required": ["mountRoot", "cacheRoot", "cacheMaxSize", "mountBackendDarwin", "mountBackendLinux"],
-      "additionalProperties": true,
+      "description": "Every key here is read by nix/lib/plan.nix settingsFrom. Adding a key that settingsFrom does not read is dead config.",
+      "required": [
+        "stateDir",
+        "mountRoot",
+        "cacheRoot",
+        "cacheMaxSize",
+        "vfsCacheMode",
+        "dirCacheTime",
+        "vfsReadAhead",
+        "nfsCacheHandleLimit",
+        "indexStateDir",
+        "indexFreshnessSloHours",
+        "mountBackendDarwin",
+        "mountBackendLinux"
+      ],
+      "additionalProperties": false,
       "properties": {
-        "mountRoot": { "type": "string" },
-        "cacheRoot": { "type": "string" },
-        "cacheMaxSize": { "type": "string", "pattern": "^[0-9]+[GMK]$" },
+        "stateDir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime state root. Holds rclone-<org>.conf (0600), stage/<org>/, last-error.<org>-<mount>."
+        },
+        "mountRoot": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Parent of every mountpoint and of every link."
+        },
+        "cacheRoot": {
+          "type": "string",
+          "minLength": 1,
+          "description": "VFS cache root. A path under /Volumes/ or /mnt/ is treated as an external volume: the mount waits for it, then fails loud. Never spills onto the boot disk."
+        },
+        "cacheMaxSize": { "type": "string", "pattern": "^[0-9]+[KMGT]$" },
         "vfsCacheMode": { "enum": ["off", "minimal", "writes", "full"] },
-        "dirCacheTime": { "type": "string" },
-        "indexStateDir": { "type": "string" },
+        "dirCacheTime": { "type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$" },
+        "vfsReadAhead": { "type": "string", "pattern": "^[0-9]+[KMGT]$" },
+        "nfsCacheHandleLimit": {
+          "type": "integer",
+          "minimum": 5,
+          "description": "rclone nfsmount only. Never passed to `rclone mount`; the flag does not exist there."
+        },
+        "indexStateDir": { "type": "string", "minLength": 1 },
+        "indexFreshnessSloHours": { "type": "integer", "minimum": 1 },
         "mountBackendDarwin": { "enum": ["nfsmount", "mount"] },
         "mountBackendLinux": { "const": "mount" }
       }
@@ -27,34 +62,76 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["name", "account", "enabled", "driveKind", "remote", "scope", "secretEnvPrefix", "mounts"],
+        "required": [
+          "name",
+          "account",
+          "enabled",
+          "driveKind",
+          "remote",
+          "scope",
+          "promotionTarget",
+          "secretEnvPrefix",
+          "mounts",
+          "links"
+        ],
         "additionalProperties": false,
         "properties": {
           "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
           "account": { "type": "string", "format": "email" },
           "enabled": { "type": "boolean" },
           "driveKind": { "enum": ["mydrive", "shared"] },
+          "teamDriveId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Shared-drive id. Required when driveKind is `shared`; render-config.sh appends `team_drive` to the stanza from it."
+          },
           "remote": { "type": "string", "pattern": "^gdrive-[a-z0-9-]+$" },
           "scope": { "enum": ["drive.readonly", "drive", "drive.file"] },
           "promotionTarget": { "enum": ["drive.readonly", "drive", "drive.file"] },
           "secretEnvPrefix": { "type": "string", "pattern": "^GDM_[A-Z0-9_]+$" },
           "mounts": {
             "type": "array",
+            "description": "One root mount per org. A second mount over the same drive doubles polling, VFS cache and dir-cache state; use `links` instead.",
+            "maxItems": 1,
             "items": {
               "type": "object",
               "required": ["name", "remotePath", "mountSuffix"],
+              "additionalProperties": false,
               "properties": {
-                "name": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-                "remotePath": { "type": "string" },
+                "name": { "const": "root" },
+                "remotePath": { "const": "" },
                 "mountSuffix": { "type": "string", "pattern": "^[a-z0-9-]+(/[a-z0-9-]+)*$" },
                 "note": { "type": "string" }
-              },
-              "additionalProperties": false
+              }
+            }
+          },
+          "links": {
+            "type": "array",
+            "description": "Symlinks into the org root mount, created at activation as <mountRoot>/<org>-<name> -> <root mountpoint>/<target>.",
+            "items": {
+              "type": "object",
+              "required": ["name", "target"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+                "target": { "type": "string", "minLength": 1 },
+                "note": { "type": "string" }
+              }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "driveKind": { "const": "shared" } }, "required": ["driveKind"] },
+            "then": { "required": ["teamDriveId"] }
+          },
+          {
+            "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+            "then": { "properties": { "mounts": { "minItems": 1 } } }
+          }
+        ]
       }
     }
   },
-  "comment": "NON-SECRET registry. client_id/client_secret/token NEVER appear here; they arrive at activation from operator-held secret files (sops-nix in lab). Any string resembling a token in this file is a gitleaks event."
+  "$comment": "NON-SECRET registry. client_id, client_secret and token never appear here; they arrive at activation from operator-held files. Any token-shaped string in this file is a gitleaks event. Secret handling is owned by docs/sops-integration.md."
 }

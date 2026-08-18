@@ -17,7 +17,7 @@
   "orgs": [
     {
       "name": "sulliwood",
-      "account": "jess@sulliwood.org",
+      "account": "tester@example.org",
       "enabled": true,
       "driveKind": "mydrive",
       "remote": "gdrive-sulliwood",
@@ -29,38 +29,46 @@
           "name": "root",
           "remotePath": "",
           "mountSuffix": "sulliwood",
-          "note": "One rclone process per org. Whole drive, read-only until an explicit per-org promotion to scope=drive."
+          "note": "Read-only org. Proves --read-only, --volname and the nfs handle limit."
         }
       ],
       "links": [
         {
           "name": "gftb-stuff",
           "target": "GFTB Stuff",
-          "note": "Initial contract goal (ratified 2026-08-17). Symlink into the root mount, not a second mount."
+          "note": "Proves the link activation entry, including a target with a space."
         }
       ]
     },
     {
-      "name": "xoxd",
-      "account": "jess@xoxd.ai",
-      "enabled": false,
-      "driveKind": "mydrive",
-      "remote": "gdrive-xoxd",
-      "scope": "drive.readonly",
+      "name": "rwlab",
+      "account": "tester@example.net",
+      "enabled": true,
+      "driveKind": "shared",
+      "teamDriveId": "0ATESTDUMMYSHAREDDRIVE",
+      "remote": "gdrive-rwlab",
+      "scope": "drive",
       "promotionTarget": "drive",
-      "secretEnvPrefix": "GDM_XOXD",
-      "mounts": [],
+      "secretEnvPrefix": "GDM_RWLAB",
+      "mounts": [
+        {
+          "name": "root",
+          "remotePath": "",
+          "mountSuffix": "rwlab",
+          "note": "Read-write org. Proves --read-only is absent when scope is drive."
+        }
+      ],
       "links": []
     },
     {
-      "name": "lmux",
-      "account": "jess@lmux.ai",
+      "name": "parked",
+      "account": "tester@example.com",
       "enabled": false,
       "driveKind": "mydrive",
-      "remote": "gdrive-lmux",
+      "remote": "gdrive-parked",
       "scope": "drive.readonly",
       "promotionTarget": "drive",
-      "secretEnvPrefix": "GDM_LMUX",
+      "secretEnvPrefix": "GDM_PARKED",
       "mounts": [],
       "links": []
     }
