@@ -1,0 +1,46 @@
+"""Root Bazel graph for gdrive-mounts.
+
+Bazel is the candidate/CI graph; the justfile is the operator front door and
+runs the same scripts directly (house doctrine, cf. oauth-mux). Validation
+targets are marker-file genrules: they shell out to scripts/ and touch a
+marker on success. They are tagged `manual` + `local` because they use tools
+from the ambient flake devShell (jq/rclone/gitleaks), not bazel toolchains.
+"""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["orgs.json"])
+
+filegroup(
+    name = "config_sources",
+    srcs = [
+        "orgs.json",
+        "config/orgs.schema.json",
+        "config/rclone.conf.template",
+    ],
+)
+
+filegroup(
+    name = "scripts",
+    srcs = glob(["scripts/*.sh"]),
+)
+
+# Marker: orgs.json schema + render pipeline validation (dummy secrets only).
+genrule(
+    name = "validate_marker",
+    srcs = [":config_sources", ":scripts"],
+    outs = ["validate.marker"],
+    cmd = "bash $(location scripts/validate-config.sh) --quick && touch $@",
+    local = True,
+    tags = ["manual"],
+)
+
+# Marker: gitleaks over the workspace (dir mode; git history scan is a CI lane).
+genrule(
+    name = "secrets_scan_marker",
+    srcs = [":scripts"],
+    outs = ["secrets-scan.marker"],
+    cmd = "bash $(location scripts/secrets-scan-dir.sh) && touch $@",
+    local = True,
+    tags = ["manual"],
+)

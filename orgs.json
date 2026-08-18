@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "mountRoot": "~/GDrive",
+    "cacheRoot": "/Volumes/TinylandSSD/gdrive-cache",
+    "cacheMaxSize": "100G",
+    "vfsCacheMode": "full",
+    "dirCacheTime": "720h",
+    "vfsReadAhead": "128M",
+    "nfsCacheHandleLimit": 250000,
+    "indexStateDir": "~/.local/state/gdrive-index",
+    "indexFreshnessSloHours": 24,
+    "mountBackendDarwin": "nfsmount",
+    "mountBackendLinux": "mount"
+  },
+  "orgs": [
+    {
+      "name": "sulliwood",
+      "account": "jess@sulliwood.org",
+      "enabled": true,
+      "driveKind": "mydrive",
+      "remote": "gdrive-sulliwood",
+      "scope": "drive.readonly",
+      "promotionTarget": "drive",
+      "secretEnvPrefix": "GDM_SULLIWOOD",
+      "mounts": [
+        {
+          "name": "gftb-stuff",
+          "remotePath": "GFTB Stuff",
+          "mountSuffix": "sulliwood/gftb-stuff",
+          "note": "Initial contract goal (ratified 2026-08-17). Read-only until explicit per-org operator promotion to scope=drive."
+        },
+        {
+          "name": "root",
+          "remotePath": "",
+          "mountSuffix": "sulliwood/root",
+          "note": "Whole-drive browse, read-only."
+        }
+      ]
+    },
+    {
+      "name": "xoxd",
+      "account": "jess@xoxd.ai",
+      "enabled": false,
+      "driveKind": "mydrive",
+      "remote": "gdrive-xoxd",
+      "scope": "drive.readonly",
+      "promotionTarget": "drive",
+      "secretEnvPrefix": "GDM_XOXD",
+      "mounts": []
+    },
+    {
+      "name": "lmux",
+      "account": "jess@lmux.ai",
+      "enabled": false,
+      "driveKind": "mydrive",
+      "remote": "gdrive-lmux",
+      "scope": "drive.readonly",
+      "promotionTarget": "drive",
+      "secretEnvPrefix": "GDM_LMUX",
+      "mounts": []
+    }
+  ]
+}

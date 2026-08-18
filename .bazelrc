@@ -1,0 +1,12 @@
+# gdrive-mounts .bazelrc — bzlmod-only, endpoint-free by doctrine.
+common --enable_bzlmod
+common --noenable_workspace
+build --verbose_failures
+test --test_output=errors
+
+# Endpoint doctrine: NEVER put --remote_cache, --remote_executor, credentials,
+# or auth headers in checked-in rc files. If GloriousFlywheel cache enrollment
+# is ratified later, endpoints arrive via runtime env only (BAZEL_REMOTE_CACHE
+# et al). Enforced by scripts/endpoint-free-check.sh (just endpoint-free-check).
+
+try-import %workspace%/user.bazelrc

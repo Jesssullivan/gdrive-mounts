@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tinyland-inc/site.scaffold/main/tinyland-repo-manifest.schema.json",
+  "name": "gdrive-mounts",
+  "owner": "Jesssullivan",
+  "visibility": "private",
+  "summary": "IaC for mounting multiple Google Workspace orgs' Drives (rclone, nix flake, bazelisk candidate graph, sole justfile entrypoint); deployed via lab home-manager.",
+  "contracts": {
+    "agent_contract": "AGENTS.md",
+    "just": true,
+    "nix": true,
+    "github_actions": true,
+    "secrets_scan": "gitleaks",
+    "conformance": "pending"
+  },
+  "boundaries": {
+    "owns_secrets": false,
+    "owns_client_surfaces": false,
+    "owns_billing": false,
+    "comment": "Secret material lives ONLY in lab sops-nix. This repo holds orgs.json (non-secret), templates, and machinery."
+  },
+  "authorities": {
+    "secrets_store": "lab (sops-nix; nix/secrets/gdrive-mounts/*)",
+    "deploy": "lab home-manager — attended `just nix-switch macbook-neo` on neo; rendered systemd --user units on sting",
+    "substrate_evidence": "docs/evidence/ (mount bakeoff, acceptance matrix)"
+  }
+}

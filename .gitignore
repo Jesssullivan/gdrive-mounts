@@ -1,0 +1,20 @@
+# Repo-local build outputs
+bazel-*
+result
+result-*
+
+# direnv
+.direnv/
+
+# Rendered runtime artifacts (may contain resolved secret paths — never commit)
+rendered/
+*.rendered.conf
+rclone.conf
+
+# OS noise
+.DS_Store
+
+# Local operator overrides
+user.bazelrc
+.env
+.env.local
