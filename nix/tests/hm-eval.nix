@@ -200,6 +200,7 @@ let
   linuxScript = name: linuxCfg.systemd.user.services.${name}.Service.ExecStart;
   renderEntry = darwinCfg.home.activation.gdriveMountsRender;
   linkEntry = darwinCfg.home.activation.gdriveMountsLinks;
+  settingsEntry = darwinCfg.home.activation.gdriveMountsSettings;
 
   checks = [
     {
@@ -307,7 +308,16 @@ let
     }
     {
       name = "activation-entries-honour-activationAfter";
-      ok = renderEntry.after == [ "writeBoundary" ] && linkEntry.after == [ "writeBoundary" ];
+      ok =
+        renderEntry.after == [ "writeBoundary" ]
+        && linkEntry.after == [ "writeBoundary" ]
+        && settingsEntry.after == [ "writeBoundary" ];
+    }
+    {
+      name = "activation-writes-effective-settings";
+      ok =
+        darwinCfg.home.activation ? gdriveMountsSettings
+        && hasInfix "${homeDir}/.local/state/gdrive-mounts/effective-settings.json" settingsEntry.data;
     }
     {
       name = "agents-carry-an-explicit-path";
@@ -333,6 +343,7 @@ else
     lsul=${linuxScript "gdrive-mounts-sulliwood-root"}
     render=${pkgs.writeText "gdrive-mounts-render-activation" renderEntry.data}
     links=${pkgs.writeText "gdrive-mounts-link-activation" linkEntry.data}
+    settings=${pkgs.writeText "gdrive-mounts-settings-activation" settingsEntry.data}
 
     # C4 — scope is enforced by the mount, not only by the token.
     grep -q -- '--read-only' "$dsul"
@@ -372,6 +383,16 @@ else
     grep -q -- '--best-effort' "$render"
     grep -q -- '--out-dir' "$render"
     grep -q 'ln -sfn' "$links"
+
+    # Activation records the settings it resolved, 0600, where doctor reads it.
+    grep -q 'effective-settings.json' "$settings"
+    grep -q -- '-m 600' "$settings"
+
+    # That record is non-secret by construction: paths and knobs, no secrets.
+    doc="$(grep -o '/nix/store/[^ ]*-gdrive-mounts-effective-settings.json' "$settings" | head -1)"
+    grep -q '"cacheRoot"' "$doc"
+    grep -q '"backend":"nfsmount"' "$doc"
+    ! grep -q '/run/secrets' "$doc"
 
     touch $out
   ''
