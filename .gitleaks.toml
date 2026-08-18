@@ -1,0 +1,44 @@
+title = "gdrive-mounts gitleaks config (house shape; mirrors tinyland-inc/site.scaffold canonical via oauth-mux)"
+
+# House defaults first; local rules below add rclone/Google-specific patterns.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build outputs, nix store paths, and age PUBLIC recipients are not secrets."
+paths = [
+  '''^bazel-''',
+  '''^result''',
+  '''^\.direnv/''',
+]
+regexes = [
+  '''age1[0-9a-z]{58}''', # age PUBLIC recipients (AGE-SECRET-KEY- is matched by a rule below)
+  '''/nix/store/[a-z0-9]{32}-[a-z0-9._+-]+''',
+]
+
+# rclone stores OAuth token JSON inline in rclone.conf. That file is gitignored
+# and must never appear here; belt-and-suspenders rule for accidental pastes.
+[[rules]]
+id = "rclone-token-blob"
+description = "rclone OAuth token JSON blob must never be committed"
+regex = '''"access_token"\s*:\s*"ya29\.[^"]{10,}"'''
+
+[[rules]]
+id = "google-oauth-access-token"
+description = "Google OAuth access token"
+regex = '''ya29\.[0-9A-Za-z_-]{20,}'''
+
+[[rules]]
+id = "google-oauth-refresh-token"
+description = "Google OAuth refresh token"
+regex = '''1//[0-9A-Za-z_-]{20,}'''
+
+[[rules]]
+id = "age-secret-key"
+description = "age SECRET key must never be committed"
+regex = '''AGE-SECRET-KEY-1[0-9A-Z]{58}'''
+
+[[rules]]
+id = "tailscale-auth-key"
+description = "Tailscale auth/ephemeral key"
+regex = '''tskey-[a-z]*-?[0-9A-Za-z]{20,}'''

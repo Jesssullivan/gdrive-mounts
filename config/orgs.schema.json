@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Jesssullivan/gdrive-mounts/config/orgs.schema.json",
+  "title": "gdrive-mounts org registry",
+  "type": "object",
+  "required": ["schema_version", "defaults", "orgs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "defaults": {
+      "type": "object",
+      "required": ["mountRoot", "cacheRoot", "cacheMaxSize", "mountBackendDarwin", "mountBackendLinux"],
+      "additionalProperties": true,
+      "properties": {
+        "mountRoot": { "type": "string" },
+        "cacheRoot": { "type": "string" },
+        "cacheMaxSize": { "type": "string", "pattern": "^[0-9]+[GMK]$" },
+        "vfsCacheMode": { "enum": ["off", "minimal", "writes", "full"] },
+        "dirCacheTime": { "type": "string" },
+        "indexStateDir": { "type": "string" },
+        "mountBackendDarwin": { "enum": ["nfsmount", "mount"] },
+        "mountBackendLinux": { "const": "mount" }
+      }
+    },
+    "orgs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "account", "enabled", "driveKind", "remote", "scope", "secretEnvPrefix", "mounts"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "account": { "type": "string", "format": "email" },
+          "enabled": { "type": "boolean" },
+          "driveKind": { "enum": ["mydrive", "shared"] },
+          "remote": { "type": "string", "pattern": "^gdrive-[a-z0-9-]+$" },
+          "scope": { "enum": ["drive.readonly", "drive", "drive.file"] },
+          "promotionTarget": { "enum": ["drive.readonly", "drive", "drive.file"] },
+          "secretEnvPrefix": { "type": "string", "pattern": "^GDM_[A-Z0-9_]+$" },
+          "mounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "remotePath", "mountSuffix"],
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+                "remotePath": { "type": "string" },
+                "mountSuffix": { "type": "string", "pattern": "^[a-z0-9-]+(/[a-z0-9-]+)*$" },
+                "note": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "comment": "NON-SECRET registry. client_id/client_secret/token NEVER appear here; they arrive at activation from operator-held secret files (sops-nix in lab). Any string resembling a token in this file is a gitleaks event."
+}

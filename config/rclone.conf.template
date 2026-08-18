@@ -1,0 +1,14 @@
+# rclone.conf per-org stanza template.
+# Rendered by scripts/render-config.sh from orgs.json. Placeholders:
+#   {{REMOTE}} {{SCOPE}}            — from orgs.json (non-secret)
+#   @SECRET:client_id@              — from operator-held secret file
+#   @SECRET:client_secret@          — from operator-held secret file
+#   @SECRET:token_json@             — from operator-held secret file (single-line JSON)
+# This template is checked in; the RENDERED output is not (gitignored, mode 0600).
+
+[{{REMOTE}}]
+type = drive
+scope = {{SCOPE}}
+client_id = @SECRET:client_id@
+client_secret = @SECRET:client_secret@
+token = @SECRET:token_json@

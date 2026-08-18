@@ -1,0 +1,16 @@
+"""gdrive_mounts — IaC for mounting multiple Google Workspace orgs' Drives.
+
+Deliberately dep-light at birth: rendering + validation are shell/genrule
+lanes driven by the justfile (the sole operator entrypoint). Add the org
+two-registry chain (tinyland-inc/bazel-registry first, then BCR) only when
+this module starts consuming org-registry modules.
+"""
+
+module(
+    name = "gdrive_mounts",
+    version = "0.1.0",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "bazel_skylib", version = "1.8.1")
+bazel_dep(name = "platforms", version = "0.0.11")
