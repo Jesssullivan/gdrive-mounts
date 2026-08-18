@@ -26,7 +26,9 @@ download and the render.
 
 ## Lab side (consumer) shape
 
-Tree: `lab:nix/secrets/gdrive-mounts/<org>/{client.json,token.json}`,
+Tree: `lab:nix/secrets/gdrive-mounts/<org>/{client.json,refresh.json}` (the
+token blob is named `refresh.json` in lab: its pre-commit guard refuses any
+staged `*token*.json`; gmailctl precedent),
 encrypted in place — whole-document JSON, not a YAML leaf per field (the
 gmailctl precedent).
 
@@ -56,8 +58,8 @@ sops.secrets."gdrive-mounts/<org>/client" = lib.optionalAttrs
     path = "${config.xdg.stateHome}/gdrive-mounts/secrets/<org>/client.json";
   };
 sops.secrets."gdrive-mounts/<org>/token" = lib.optionalAttrs
-  (builtins.pathExists ./gdrive-mounts/<org>/token.json) {
-    sopsFile = ./gdrive-mounts/<org>/token.json;
+  (builtins.pathExists ./gdrive-mounts/<org>/refresh.json) {
+    sopsFile = ./gdrive-mounts/<org>/refresh.json;
     format = "json";
     key = "";
     path = "${config.xdg.stateHome}/gdrive-mounts/secrets/<org>/token.json";

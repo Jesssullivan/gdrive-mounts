@@ -109,12 +109,12 @@ seed_one() { # src dest-basename
 }
 
 seed_one "$src_client" client.json
-seed_one "$src_token" token.json
+seed_one "$src_token" refresh.json   # lab refuses staged *token*.json; gmailctl precedent
 
 jq -e '(.installed // .web) | .client_secret | startswith("ENC[")' "$DEST/client.json" >/dev/null ||
   die "$DEST/client.json client_secret is not ciphertext"
-jq -e '(.access_token // .refresh_token) | startswith("ENC[")' "$DEST/token.json" >/dev/null ||
-  die "$DEST/token.json token values are not ciphertext"
+jq -e '(.access_token // .refresh_token) | startswith("ENC[")' "$DEST/refresh.json" >/dev/null ||
+  die "$DEST/refresh.json token values are not ciphertext"
 
 # Keep the non-secret mint record where doctor can still read it after the
 # stage is wiped: it is what proves which scope was actually granted.
@@ -132,7 +132,7 @@ else
   info "wiped the stage for $ORG"
 fi
 
-info "wrote $DEST/client.json and $DEST/token.json (sops ciphertext)"
+info "wrote $DEST/client.json and $DEST/refresh.json (sops ciphertext)"
 cat >&2 <<SNIPPET
 
 Lab wiring for $ORG:
@@ -145,7 +145,7 @@ Lab wiring for $ORG:
     path = "\${config.home.homeDirectory}/.local/state/gdrive-mounts/secrets/$ORG/client.json";
   };
   sops.secrets."gdrive-mounts/$ORG/token" = {
-    sopsFile = ./gdrive-mounts/$ORG/token.json;
+    sopsFile = ./gdrive-mounts/$ORG/refresh.json;
     format = "json";
     key = "";
     path = "\${config.home.homeDirectory}/.local/state/gdrive-mounts/secrets/$ORG/token.json";
