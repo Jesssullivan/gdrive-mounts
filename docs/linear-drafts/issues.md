@@ -1,5 +1,8 @@
 # Linear issue drafts — gdrive-mounts
 
+**Superseded by `docs/tracker.md` once these are filed** — that file carries
+the draft → Linear-ID map; this file stops changing once filing starts.
+
 **Status**: UNFILED. The pi `tracker-linear`/`recon` seat is read-only
 (30 read tools, 0 writes; verified twice 2026-08-17). File when a
 write-capable seat exists, or the operator files by pasting. Team: **Tinyland**.
