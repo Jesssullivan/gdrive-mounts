@@ -35,8 +35,14 @@ can encrypt into it — the existing catch-all only matches `.yaml$`:
 
 ```yaml
 - path_regex: nix/secrets/gdrive-mounts/.*\.json$
-  key_groups: *fleet_keys   # same age recipients as the gmailctl rule
+  key_groups:
+    - age:
+        - *jsullivan2_macbook_neo   # the two mount clients only
+        - *jess_sting
 ```
+
+(`lab` branch `feat/gdrive-mounts-wrapper` carries this rule; `just seed-lab`
+prints the stanza when it is missing.)
 
 Declared in `lab:nix/secrets/default.nix`, presence-gated so an unseeded org
 degrades instead of blocking activation:
