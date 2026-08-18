@@ -12,7 +12,7 @@ earlier backend passes and the operator doesn't ask for the next one.
 | OS / arch | |
 | rclone version | |
 | Backend package + version | |
-| Org / remote used (scratch only — never GFTB Stuff) | |
+| Org / remote used (read-only scope only; no writes) | |
 | Scope | |
 | Date/time | |
 

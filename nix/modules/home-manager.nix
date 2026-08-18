@@ -102,6 +102,14 @@ let
   # The volume the cache lives on, not the cache directory itself.
   cacheVolume = plan.cacheVolume settings.cacheRoot;
 
+  # Is anything mounted at the point? mount(8) on darwin, mountpoint(1) on linux.
+  isMounted =
+    point:
+    if cfg.platform == "darwin" then
+      ''mount | grep -qF " on ${point} ("''
+    else
+      ''mountpoint -q ${escapeShellArg point}'';
+
   sweepStaleMount =
     point:
     if cfg.platform == "darwin" then
@@ -147,8 +155,11 @@ let
         waited=$((waited + 5))
       done
 
-      # Clear a stale mount handle left by a killed rclone, then take the point.
-      if ! stat "$point" >/dev/null 2>&1; then
+      # Clear anything already mounted at the point (a dead NFS loopback left by
+      # a killed rclone keeps answering stat from cache and hangs every real
+      # read until it is force-unmounted). We are the only legitimate mounter
+      # of this path and we are not running yet, so an existing mount is stale.
+      if ${isMounted u.point}; then
         ${sweepStaleMount u.point}
       fi
       mkdir -p "$point" "$cache"
