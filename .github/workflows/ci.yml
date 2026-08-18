@@ -3,9 +3,10 @@ name: ci
 # Five lanes (review r1 NEW-nix-6 / C4 / NEW-6, ruling 8 — enroll in
 # tinyland-nix now, keep a credential-free hosted lane, add a diagnostic
 # darwin lane, split the secrets scan into its own job):
-#   check          — tinyland-nix (self-hosted, cache-backed); not required
-#                    until the jesssullivan-infra enrollment PR is applied
-#                    and one run is observed green (plan Phase 2, Gate C).
+#   check          — tinyland-nix (self-hosted, cache-backed); enabled by the
+#                    repo variable GF_ENROLLED=true after the jesssullivan-infra
+#                    enrollment PR (#92) is applied; made required once one
+#                    run is observed green (plan Phase 2, Gate C).
 #   public-source  — ubuntu-latest, credential-free; the house
 #                    fork/PR-safe gate (oauth-mux public-source.yml pattern).
 #   darwin-eval    — macos-latest, diagnostic: no GloriousFlywheel darwin
@@ -35,7 +36,12 @@ jobs:
     # Guard against a forked PR reaching the self-hosted, cache-backed
     # runner (house pattern, oauth-mux ci.yml). gdrive-mounts is private, so
     # this is belt-and-suspenders, not the only control.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Gated on the repo variable GF_ENROLLED=true, set by the operator once the
+    # jesssullivan-infra scale set (PR #92) is applied and a run is observed
+    # green. Until then a tinyland-nix job would queue forever with no runner.
+    if: >-
+      vars.GF_ENROLLED == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: tinyland-nix
     timeout-minutes: 30
     steps:

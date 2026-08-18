@@ -34,8 +34,11 @@ CI enrollment authority: `Jesssullivan/jesssullivan-infra` PR #92
 (`tofu/stacks/arc-runners/jesssullivan.tfvars`,
 `extra_runner_sets.gdrive-mounts-nix`) adds the `tinyland-nix` runner set for
 this repo. Applying that runner set is an operator `workflow_dispatch` act in
-that repo, not an agent act. The lanes themselves live in
-`.github/workflows/ci.yml` here.
+that repo, not an agent act. After the apply, the operator sets the repo
+variable `GF_ENROLLED=true` (`gh variable set GF_ENROLLED --body true`) to
+turn the `check (tinyland-nix)` job on, and makes it a required check once
+one run is green. The lanes themselves live in `.github/workflows/ci.yml`
+here; the hosted `public-source` lane is the required gate until then.
 
 ## sting posture
 
