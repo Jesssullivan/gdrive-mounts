@@ -42,7 +42,7 @@ here; the hosted `public-source` lane is the required gate until then.
 
 ## sting posture
 
-sting is a tainted honey-cluster compute node with ephemeral-scratch storage
+sting is a shared compute-expansion node with ephemeral-scratch storage
 (TIN-2455 SPOF context). It gets rendered systemd --user units and nothing
 else durable — no state of record, no index database of record. See
 `docs/runbook.md` for the Linux unit shape.
