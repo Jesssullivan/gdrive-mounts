@@ -34,7 +34,8 @@ rclone processes — e.g. `~/GDrive/sulliwood-gftb-stuff` links to
 nix develop --command just render [ORG]   # materialize rclone-<org>.conf (0600)
 nix develop --command just index          # refresh the metadata index now
 launchctl kickstart -k gui/$(id -u)/dev.tinyland.gdrive-mounts.sulliwood-root
-umount ~/GDrive/sulliwood                 # stop an nfsmount cleanly
+launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.sulliwood-root   # stop cleanly (SIGTERM → rclone unmounts)
+umount -f ~/GDrive/sulliwood              # only for a dead mount left by a crash
 ```
 
 ## Index (the agent/AX query surface)
@@ -56,7 +57,8 @@ writing). Raw per-org JSON at `<indexStateDir>/<org>.json`.
 | agent flaps, err log `invalid_grant` | expired refresh token | `just mint-token <org>`, `just seed-lab <org>`, re-switch |
 | agent flaps, err log `invalid_grant`, right after an operator revoked access in Workspace/GCP admin | revoked consent, not mere expiry | full re-consent required — repeat `docs/adoption.md` steps 0–3 for that org, not just a token refresh |
 | agent restart-loops, exits `78`, `last-error.<org>-root` present | cache SSD absent at mount time (`/Volumes/TinylandSSD` not mounted) | mount the SSD; the agent waits ~120s then fails loud once — it never spills onto the boot disk |
-| `Device not configured` on the mountpoint | stale NFS handle after a crash | `umount -f` the mountpoint, then kickstart the agent |
+| reads under the mountpoint hang (`stat` still answers from cache) | dead NFS loopback: rclone was killed without unmounting | `umount -f` the mountpoint, then kickstart the agent; the wrapper does this sweep itself on every start (bakeoff evidence 2026-08-18) |
+| plain `umount` says `Resource busy` right after activity | NFS handles still cached | stop the agent instead (`launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.<org>-root` sends SIGTERM; rclone unmounts cleanly), or `umount -f` |
 | slow first `ls` of a big directory | cold VFS dir cache | expected once; the dir-cache TTL keeps it warm after — use the index for search, not `ls`, on a cold mount |
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |
 | a write looks accepted but silently vanishes, or the mount is still read-only after promotion | `orgs.json` `scope` was flipped but the token was never re-minted | scope lives in the token, not the config file — re-run `just mint-token <org>` after any scope change; see `docs/sops-integration.md` |

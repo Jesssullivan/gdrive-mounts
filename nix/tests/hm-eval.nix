@@ -355,6 +355,9 @@ else
     ! grep -q 'GDM_RWLAB' "$dsul"
 
     # C6 — bounded wait then a loud, distinguishable exit.
+    grep -qF 'mount | grep -qF " on ' "$dsul"
+    grep -q 'umount -f' "$dsul"
+    grep -q 'mountpoint -q' "$lsul"
     grep -q 'exit 78' "$dsul"
     grep -q 'last-error.sulliwood-root' "$dsul"
     # C6: the guard waits on the VOLUME mountpoint, not the cache root's parent
