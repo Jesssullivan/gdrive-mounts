@@ -444,8 +444,8 @@ in
     activationAfter = mkOption {
       type = types.listOf types.str;
       default = [ "writeBoundary" ];
-      example = literalExpression ''[ "writeBoundary" "setupSecrets" ]'';
-      description = "Activation entries this module's render and link steps run after.";
+      example = literalExpression ''[ "writeBoundary" "sops-nix" ]'';
+      description = "Activation entries this module's render and link steps run after. sops-nix's home-manager module names its entry `sops-nix` (`setupSecrets` is the NixOS name; an unknown name is silently ignored by the DAG).";
     };
 
     index = {
