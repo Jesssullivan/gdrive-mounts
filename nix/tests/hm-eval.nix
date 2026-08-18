@@ -357,6 +357,9 @@ else
     # C6 — bounded wait then a loud, distinguishable exit.
     grep -q 'exit 78' "$dsul"
     grep -q 'last-error.sulliwood-root' "$dsul"
+    # C6: the guard waits on the VOLUME mountpoint, not the cache root's parent
+    # (the cache root sits in a user-owned subtree of a root-owned volume).
+    grep -q "volume=/Volumes/TinylandSSD\b" "$dsul" || grep -q "volume='/Volumes/TinylandSSD'" "$dsul" || grep -q 'volume=/Volumes/TinylandSSD$' "$dsul"
 
     # Render happens only when the config is missing; rclone owns it afterwards.
     grep -q 'gdrive-mounts-render-config' "$dsul"

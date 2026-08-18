@@ -3,7 +3,7 @@
   "defaults": {
     "stateDir": "~/.local/state/gdrive-mounts",
     "mountRoot": "~/GDrive",
-    "cacheRoot": "/Volumes/TinylandSSD/gdrive-cache",
+    "cacheRoot": "/Volumes/TinylandSSD/tinyland/gdrive-cache",
     "cacheMaxSize": "100G",
     "vfsCacheMode": "full",
     "dirCacheTime": "720h",

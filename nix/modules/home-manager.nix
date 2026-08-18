@@ -100,7 +100,7 @@ let
     '';
 
   # The volume the cache lives on, not the cache directory itself.
-  cacheVolume = builtins.dirOf settings.cacheRoot;
+  cacheVolume = plan.cacheVolume settings.cacheRoot;
 
   sweepStaleMount =
     point:
