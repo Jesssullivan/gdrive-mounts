@@ -53,6 +53,20 @@ let
 
   cacheDir = settings: org: "${settings.cacheRoot}/${org.name}";
 
+  # The volume the cache lives on: for /Volumes/<name>/... and /mnt/<name>/...
+  # that is the mountpoint two components deep (the cache root may sit in a
+  # user-owned subtree of a root-owned volume, e.g. /Volumes/TinylandSSD/tinyland);
+  # elsewhere it is the cache root's parent.
+  cacheVolume =
+    cacheRoot:
+    let
+      parts = filter (x: x != "") (lib.splitString "/" cacheRoot);
+    in
+    if (hasPrefix "/Volumes/" cacheRoot || hasPrefix "/mnt/" cacheRoot) && builtins.length parts >= 2 then
+      "/" + (builtins.elemAt parts 0) + "/" + (builtins.elemAt parts 1)
+    else
+      builtins.dirOf cacheRoot;
+
   mountPoint = settings: mount: "${settings.mountRoot}/${mount.mountSuffix}";
 
   unitName = org: mount: "gdrive-mounts-${org.name}-${mount.name}";
@@ -175,6 +189,7 @@ let
 in
 {
   inherit
+    cacheVolume
     expandHome
     settingsFrom
     backendFor
