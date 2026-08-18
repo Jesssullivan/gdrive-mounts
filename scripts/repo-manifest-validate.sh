@@ -5,7 +5,8 @@
 # Schema lookup, first hit wins:
 #   1. $TINYLAND_REPO_SCHEMA               (explicit file)
 #   2. ../site.scaffold/docs/schemas/...   (sibling checkout)
-#   3. the manifest's own $schema URL      (curl into a scratch dir)
+#   3. docs/schemas/...                    (vendored pin, see docs/schemas/README.md)
+#   4. the manifest's own $schema URL      (gh api, then curl, into a scratch dir)
 # The file name follows schema_version, the same selection site.scaffold's own
 # recipe makes: 1 -> tinyland-repo-manifest.schema.json,
 #               2 -> tinyland-repo-manifest.v2.schema.json.
@@ -46,6 +47,10 @@ if [ -n "${TINYLAND_REPO_SCHEMA:-}" ]; then
   SCHEMA="$TINYLAND_REPO_SCHEMA"
 elif [ -r "../site.scaffold/docs/schemas/$name" ]; then
   SCHEMA="../site.scaffold/docs/schemas/$name"
+elif [ -r "docs/schemas/$name" ]; then
+  # Vendored pin (docs/schemas/README.md records the source rev). site.scaffold
+  # is private, so CI has no other offline path to the canonical schema.
+  SCHEMA="docs/schemas/$name"
 else
   secure_tmpdir
   # site.scaffold is a private repo: raw.githubusercontent.com answers 404

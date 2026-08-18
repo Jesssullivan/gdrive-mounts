@@ -114,10 +114,13 @@ if [ -d nix ]; then
   # The platform decision lives in exactly one place, so the eval fixture can
   # flip it and exercise both branches on one runner.
   # grep -o then wc -l: grep -c would count matching lines, not occurrences.
-  n_stdenv="$(grep -o 'stdenv\.is' "$MODULE" | wc -l | tr -d ' ' || true)"
+  # The module reads the host platform exactly once (pkgs.stdenv.hostPlatform.isDarwin,
+  # the `platform` option default). Count every `stdenv` occurrence so a second read
+  # anywhere in the file fails loudly.
+  n_stdenv="$(grep -o 'stdenv' "$MODULE" | wc -l | tr -d ' ' || true)"
   [ -n "$n_stdenv" ] || n_stdenv=0
-  [ "$n_stdenv" = "1" ] || fail "'stdenv.is' appears $n_stdenv time(s) in $MODULE; exactly one platform decision is allowed"
-  info "platform decision OK (one stdenv.is in $MODULE)"
+  [ "$n_stdenv" = "1" ] || fail "'stdenv' appears $n_stdenv time(s) in $MODULE; exactly one platform decision is allowed"
+  info "platform decision OK (one stdenv read in $MODULE)"
 else
   warn "no nix/ directory here; skipped the defaults-SSOT and platform assertions"
 fi
