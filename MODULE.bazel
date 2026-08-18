@@ -1,9 +1,14 @@
 """gdrive_mounts — IaC for mounting multiple Google Workspace orgs' Drives.
 
-Deliberately dep-light at birth: rendering + validation are shell/genrule
-lanes driven by the justfile (the sole operator entrypoint). Add the org
-two-registry chain (tinyland-inc/bazel-registry first, then BCR) only when
-this module starts consuming org-registry modules.
+Deliberately dep-light: rendering + validation are shell lanes driven by the
+justfile (the sole operator entrypoint); Bazel wraps the same scripts as
+rules_shell `sh_test`s so they run in the candidate/CI graph too — see
+BUILD.bazel. `rules_shell` pulls in `bazel_skylib` and `platforms`
+transitively; do not add direct `bazel_dep`s for either until BUILD.bazel
+actually `load()`s something from them (house finding bazel-ci-manifest/C6:
+two unused direct deps shipped in the original scaffold with zero loads).
+Add the org two-registry chain (tinyland-inc/bazel-registry first, then BCR)
+only when this module starts consuming org-registry modules.
 """
 
 module(
@@ -12,5 +17,4 @@ module(
     compatibility_level = 1,
 )
 
-bazel_dep(name = "bazel_skylib", version = "1.8.1")
-bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "rules_shell", version = "0.8.0")
