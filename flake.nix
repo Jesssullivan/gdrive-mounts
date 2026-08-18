@@ -73,6 +73,10 @@
 
         devShells.default = pkgs.mkShell {
           packages = [
+            # coreutils/gnused first: bazelisk ships a `sha256sum` helper that
+            # would otherwise shadow GNU sha256sum on PATH.
+            pkgs.coreutils
+            pkgs.gnused
             pkgs.just
             pkgs.bazelisk
             pkgs.rclone
@@ -84,8 +88,6 @@
             pkgs.actionlint
             pkgs.check-jsonschema
             pkgs.shellcheck
-            pkgs.coreutils
-            pkgs.gnused
           ];
         };
 
