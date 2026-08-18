@@ -1,10 +1,27 @@
 name: ci
 
+# Five lanes (review r1 NEW-nix-6 / C4 / NEW-6, ruling 8 — enroll in
+# tinyland-nix now, keep a credential-free hosted lane, add a diagnostic
+# darwin lane, split the secrets scan into its own job):
+#   check          — tinyland-nix (self-hosted, cache-backed); enabled by the
+#                    repo variable GF_ENROLLED=true after the jesssullivan-infra
+#                    enrollment PR (#92) is applied; made required once one
+#                    run is observed green (plan Phase 2, Gate C).
+#   public-source  — ubuntu-latest, credential-free; the house
+#                    fork/PR-safe gate (oauth-mux public-source.yml pattern).
+#   darwin-eval    — macos-latest, diagnostic: no GloriousFlywheel darwin
+#                    runner lane exists (runner-lanes.md), so this hosted
+#                    job is the only place the module's Darwin branch is
+#                    ever evaluated.
+#   secrets-scan   — git-history gitleaks (review r1 NEW-history: every
+#                    other gate scans the working tree only).
+#   actionlint     — lints this file and any sibling workflow.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,9 +32,72 @@ concurrency:
 
 jobs:
   check:
+    name: check (tinyland-nix)
+    # Guard against a forked PR reaching the self-hosted, cache-backed
+    # runner (house pattern, oauth-mux ci.yml). gdrive-mounts is private, so
+    # this is belt-and-suspenders, not the only control.
+    # Gated on the repo variable GF_ENROLLED=true, set by the operator once the
+    # jesssullivan-infra scale set (PR #92) is applied and a run is observed
+    # green. Until then a tinyland-nix job would queue forever with no runner.
+    if: >-
+      vars.GF_ENROLLED == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: tinyland-nix
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: tinyland-inc/ci-templates/.github/actions/nix-setup@v2
+      - name: just check-ci
+        run: nix develop --command just check-ci
+
+  public-source:
+    name: public-source (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
-      - name: just check
-        run: nix develop --command just check
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: just check-ci
+        run: nix develop --command just check-ci
+
+  darwin-eval:
+    name: darwin-eval (macos-latest, diagnostic)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: hm-eval + devShell eval on the real Darwin platform
+        run: |
+          nix develop --command just hm-eval
+          nix eval .#devShells.aarch64-darwin.default.name
+
+  secrets-scan:
+    name: secrets-scan (git history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: gitleaks git history scan
+        run: nix develop --command gitleaks git . --config .gitleaks.toml --redact --exit-code 1
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: actionlint
+        run: nix develop --command actionlint

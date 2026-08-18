@@ -1,0 +1,261 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://raw.githubusercontent.com/tinyland-inc/site.scaffold/main/docs/schemas/tinyland-repo-manifest.schema.json",
+	"title": "Tinyland repo manifest",
+	"description": "Declarative repo-shape manifest for Tinyland repos. This distinguishes org-wide rules from static-spoke, mothership, app/stateful spoke, CI-template, GitOps receiver, and infra-substrate contracts.",
+	"type": "object",
+	"required": ["schema_version", "repo", "taxonomy", "contracts", "boundaries", "authorities", "supply_chain"],
+	"additionalProperties": false,
+	"properties": {
+		"$schema": {
+			"type": "string"
+		},
+		"schema_version": {
+			"const": 1
+		},
+		"scaffold_tag": {
+			"type": "string",
+			"minLength": 1,
+			"description": "The site.scaffold release tag this repo was spawned from (e.g. v0.1.0). Stamped by scripts/rebrand.sh at spawn time and read by tinyland-scaffold-doctor Layer 2 for the version-drift diff; when absent the doctor silently falls back to the latest release. The scaffold template itself carries its own current release tag."
+		},
+		"repo": {
+			"type": "object",
+			"required": ["name", "github", "description"],
+			"additionalProperties": false,
+			"properties": {
+				"name": {
+					"type": "string",
+					"pattern": "^[A-Za-z0-9_.-]+$"
+				},
+				"github": {
+					"type": "string",
+					"pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+				},
+				"domain": {
+					"type": "string",
+					"format": "hostname"
+				},
+				"description": {
+					"type": "string",
+					"minLength": 12
+				},
+				"linear": {
+					"type": "object",
+					"additionalProperties": false,
+					"properties": {
+						"initiative": {
+							"type": "string",
+							"pattern": "^[A-Z]+-[0-9]+$"
+						},
+						"issue": {
+							"type": "string",
+							"pattern": "^[A-Z]+-[0-9]+$"
+						}
+					}
+				}
+			}
+		},
+		"taxonomy": {
+			"type": "object",
+			"required": ["primary_role", "layers"],
+			"additionalProperties": false,
+			"properties": {
+				"primary_role": {
+					"$ref": "#/$defs/repoRole"
+				},
+				"spawned_repo_role": {
+					"$ref": "#/$defs/repoRole",
+					"description": "For scaffold/template repos, the role created repos should declare."
+				},
+				"layers": {
+					"type": "array",
+					"minItems": 1,
+					"uniqueItems": true,
+					"items": {
+						"$ref": "#/$defs/taxonomyLayer"
+					}
+				}
+			}
+		},
+		"enrollment": {
+			"type": "object",
+			"description": "First-class declaration of the four GloriousFlywheel enrollment dimensions. ADDITIVE + optional (TIN-2109/TIN-2119): existing manifests without this object still validate. When present, `substrateMode` is the AUTHORITATIVE expected mode fed to scripts/cache-attachment-contract.sh --strict in the cache-backed lane; a declared-vs-actual mismatch fails closed.",
+			"additionalProperties": false,
+			"properties": {
+				"forgeScope": {
+					"type": "string",
+					"minLength": 1,
+					"description": "Forge account / org that owns the repo."
+				},
+				"operatorOverlay": {
+					"type": "string",
+					"minLength": 1,
+					"description": "Operator overlay that provisions the repo's runners/secrets (e.g. jesssullivan-infra)."
+				},
+				"executionPool": {
+					"type": "string",
+					"minLength": 1,
+					"description": "Execution pool the lanes target (e.g. tinyland-nix in-cluster ARC)."
+				},
+				"substrateMode": {
+					"$ref": "#/$defs/substrateMode",
+					"description": "Authoritative Bazel substrate mode. compatibility-local-only = no shared cache; shared-cache-backed = cache-first (TIN-1997 Option D); executor-backed = REAPI executor (DEFINED but not selected here)."
+				}
+			}
+		},
+		"contracts": {
+			"type": "object",
+			"required": ["agent_contract", "just", "nix", "github_actions", "secrets_scan", "conformance"],
+			"additionalProperties": false,
+			"properties": {
+				"agent_contract": {
+					"type": "string"
+				},
+				"just": {
+					"type": "string"
+				},
+				"nix": {
+					"type": "string"
+				},
+				"github_actions": {
+					"type": "string"
+				},
+				"secrets_scan": {
+					"enum": ["gitleaks", "none"]
+				},
+				"conformance": {
+					"type": "string"
+				}
+			}
+		},
+		"boundaries": {
+			"type": "object",
+			"required": [
+				"owns_runtime_backend",
+				"owns_auth",
+				"owns_payments",
+				"owns_activitypub_delivery",
+				"owns_live_broker_fetch",
+				"owns_static_projection_ingest",
+				"owns_gitops_apply",
+				"owns_cloudflare_mutation",
+				"owns_bazel_module_authority"
+			],
+			"additionalProperties": false,
+			"properties": {
+				"owns_runtime_backend": { "type": "boolean" },
+				"owns_auth": { "type": "boolean" },
+				"owns_payments": { "type": "boolean" },
+				"owns_activitypub_delivery": { "type": "boolean" },
+				"owns_live_broker_fetch": { "type": "boolean" },
+				"owns_static_projection_ingest": { "type": "boolean" },
+				"owns_gitops_apply": { "type": "boolean" },
+				"owns_cloudflare_mutation": { "type": "boolean" },
+				"owns_bazel_module_authority": { "type": "boolean" }
+			}
+		},
+		"authorities": {
+			"type": "object",
+			"additionalProperties": false,
+			"properties": {
+				"content_authority": { "type": "string" },
+				"gitops_receiver": { "type": "string" },
+				"ci_templates": { "type": "string" },
+				"cache_rbe_authority": { "type": "string" },
+				"tofu_module_authority": { "type": "string" },
+				"package_registry": { "type": "string" }
+			}
+		},
+		"supply_chain": {
+			"type": "object",
+			"required": ["sbom"],
+			"additionalProperties": false,
+			"properties": {
+				"sbom": {
+					"type": "object",
+					"required": ["status", "formats"],
+					"additionalProperties": false,
+					"properties": {
+						"status": {
+							"enum": ["not-required", "planned", "recipe-available", "generated"]
+						},
+						"formats": {
+							"type": "array",
+							"uniqueItems": true,
+							"items": {
+								"enum": ["CycloneDX JSON", "SPDX JSON"]
+							}
+						},
+						"notes": {
+							"type": "string"
+						}
+					}
+				}
+			}
+		}
+	},
+	"allOf": [
+		{
+			"if": {
+				"properties": {
+					"taxonomy": {
+						"properties": {
+							"primary_role": {
+								"enum": ["static-spoke", "static-spoke-scaffold"]
+							}
+						}
+					}
+				}
+			},
+			"then": {
+				"properties": {
+					"boundaries": {
+						"properties": {
+							"owns_runtime_backend": { "const": false },
+							"owns_auth": { "const": false },
+							"owns_payments": { "const": false },
+							"owns_activitypub_delivery": { "const": false },
+							"owns_live_broker_fetch": { "const": false },
+							"owns_gitops_apply": { "const": false },
+							"owns_cloudflare_mutation": { "const": false }
+						}
+					},
+					"authorities": {
+						"not": { "required": ["gitops_receiver"] }
+					}
+				}
+			}
+		}
+	],
+	"$defs": {
+		"substrateMode": {
+			"enum": ["compatibility-local-only", "shared-cache-backed", "executor-backed"]
+		},
+		"repoRole": {
+			"enum": [
+				"static-spoke-scaffold",
+				"static-spoke",
+				"mothership",
+				"app-stateful-spoke",
+				"package-producer",
+				"package-consumer",
+				"ci-template-library",
+				"gitops-receiver",
+				"infra-substrate",
+				"org-utility"
+			]
+		},
+		"taxonomyLayer": {
+			"enum": [
+				"org-wide-repo-contract",
+				"bazel-package-cache-rbe",
+				"static-spoke",
+				"mothership",
+				"app-stateful-spoke",
+				"gitops-receiver",
+				"ci-template-library",
+				"infra-substrate"
+			]
+		}
+	}
+}

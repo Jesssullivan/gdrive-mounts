@@ -6,9 +6,15 @@ useDefault = true
 
 [allowlist]
 description = "Build outputs, nix store paths, and age PUBLIC recipients are not secrets."
+# Anchored at both ends: an unanchored '^result' also allowlisted `results/`
+# and `resultsecrets.json`, and an unanchored '^bazel-' allowlisted anything
+# starting with that prefix at any depth (review r1 finding S7b, verified
+# against gitleaks 8.30.1) — a real committed-then-deleted secret under
+# either name would have passed silently. `\.direnv/` is unaffected: the
+# trailing `/` already requires an exact directory-name boundary.
 paths = [
-  '''^bazel-''',
-  '''^result''',
+  '''^bazel-[^/]+$''',
+  '''^result(-[0-9]+)?$''',
   '''^\.direnv/''',
 ]
 regexes = [
@@ -22,6 +28,11 @@ regexes = [
 id = "rclone-token-blob"
 description = "rclone OAuth token JSON blob must never be committed"
 regex = '''"access_token"\s*:\s*"ya29\.[^"]{10,}"'''
+
+[[rules]]
+id = "gcp-oauth-client-secret"
+description = "GCP OAuth Desktop client secret (the credential an operator downloads from the GCP console for import-client)"
+regex = '''GOCSPX-[A-Za-z0-9_-]{20,}'''
 
 [[rules]]
 id = "google-oauth-access-token"
@@ -41,4 +52,9 @@ regex = '''AGE-SECRET-KEY-1[0-9A-Z]{58}'''
 [[rules]]
 id = "tailscale-auth-key"
 description = "Tailscale auth/ephemeral key"
-regex = '''tskey-[a-z]*-?[0-9A-Za-z]{20,}'''
+# The prior regex (tskey-[a-z]*-?[0-9A-Za-z]{20,}) never matched the real
+# format tskey-auth-k<11 chars>CNTRL-<32 chars> — only 17 alnum chars precede
+# the internal dash, short of the old rule's 20-char minimum (review r1
+# finding S7b, verified: no match on a realistic sample). Two shorter runs
+# either side of the internal dash match the real shape.
+regex = '''tskey-[a-z]+-[0-9A-Za-z]{10,}-?[0-9A-Za-z]{10,}'''

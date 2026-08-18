@@ -1,46 +1,114 @@
 """Root Bazel graph for gdrive-mounts.
 
 Bazel is the candidate/CI graph; the justfile is the operator front door and
-runs the same scripts directly (house doctrine, cf. oauth-mux). Validation
-targets are marker-file genrules: they shell out to scripts/ and touch a
-marker on success. They are tagged `manual` + `local` because they use tools
-from the ambient flake devShell (jq/rclone/gitleaks), not bazel toolchains.
+runs the same scripts directly (house doctrine, cf. oauth-mux). Targets below
+are `rules_shell` `sh_test`s that exec the exact scripts/*.sh the justfile
+calls — no bazel-only validation logic is duplicated here.
+
+Tools come from the ambient flake devShell PATH, not a Bazel toolchain: jq,
+rclone, gitleaks, sqlite, check-jsonschema. `.bazelrc`'s `test --test_env=PATH`
+line forwards the invoking shell's PATH into the test's runtime environment,
+so these targets only pass when the invoking shell is already inside the
+devShell. The operator entrypoint is `just bazel-test`, which runs
+`bazelisk test //...`; CI never calls bazel directly — the `check` job's
+workflow step is `nix develop --command just check-ci`, which runs
+`bazel-test` as one of its recipes, so PATH is always devShell PATH by the
+time bazel starts.
+
+Every script `cd`s to `git rev-parse --show-toplevel`, falling back to `pwd`
+when that fails (no `.git` inside the Bazel runfiles tree). `sh_test`'s
+runtime working directory is the runfiles root, which mirrors the
+repo-relative source layout via the `data` attributes below — the `pwd`
+fallback therefore already lands each script next to its own `orgs.json`,
+`config/`, `.gitleaks.toml`, etc., so no extra `BUILD_WORKSPACE_DIRECTORY`
+handling is needed here.
+
+Tests are tagged `local` (no cross-machine sandbox reuse; these targets read
+mutable operator/devShell state) and `requires-network=no` (endpoint-free
+doctrine — nothing here dials out; `rclone` only parses a rendered config
+file).
 """
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["orgs.json"])
 
+# Non-script inputs shared by more than one test below.
 filegroup(
     name = "config_sources",
     srcs = [
-        "orgs.json",
+        ".bazelrc",
+        ".gitleaks.toml",
         "config/orgs.schema.json",
         "config/rclone.conf.template",
+        "orgs.json",
+        "tinyland.repo.json",
     ],
 )
 
+# All shell scripts, including scripts/lib/common.sh — sourced by name, so
+# every test that runs any script needs the full set as data, not just the
+# one script named in `srcs`.
 filegroup(
     name = "scripts",
-    srcs = glob(["scripts/*.sh"]),
+    srcs = glob(["scripts/**/*.sh"]),
 )
 
-# Marker: orgs.json schema + render pipeline validation (dummy secrets only).
-genrule(
-    name = "validate_marker",
-    srcs = [":config_sources", ":scripts"],
-    outs = ["validate.marker"],
-    cmd = "bash $(location scripts/validate-config.sh) --quick && touch $@",
-    local = True,
-    tags = ["manual"],
+sh_test(
+    name = "validate_test",
+    srcs = ["scripts/validate-config.sh"],
+    args = ["--quick"],
+    data = [
+        ":config_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
 )
 
-# Marker: gitleaks over the workspace (dir mode; git history scan is a CI lane).
-genrule(
-    name = "secrets_scan_marker",
-    srcs = [":scripts"],
-    outs = ["secrets-scan.marker"],
-    cmd = "bash $(location scripts/secrets-scan-dir.sh) && touch $@",
-    local = True,
-    tags = ["manual"],
+sh_test(
+    name = "secrets_scan_test",
+    srcs = ["scripts/secrets-scan-dir.sh"],
+    data = [
+        ":config_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
+)
+
+sh_test(
+    name = "endpoint_free_test",
+    srcs = ["scripts/endpoint-free-check.sh"],
+    data = [
+        ":config_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
+)
+
+# scripts/repo-manifest-validate.sh is the L2-owned CLI (see the shared
+# implementer contract); this target wires it into the candidate/CI graph.
+# check-jsonschema comes from the devShell PATH per the file docstring above.
+sh_test(
+    name = "repo_manifest_test",
+    srcs = ["scripts/repo-manifest-validate.sh"],
+    data = [
+        ":config_sources",
+        ":scripts",
+        "docs/schemas/tinyland-repo-manifest.schema.json",  # vendored pin (docs/schemas/README.md)
+    ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
 )

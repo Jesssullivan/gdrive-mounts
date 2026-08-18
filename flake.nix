@@ -26,10 +26,16 @@
           dontBuild = true;
           installPhase = ''
             runHook preInstall
-            mkdir -p $out/bin $out/share/gdrive-mounts
-            for s in render-config validate-config secrets-scan-dir endpoint-free-check gdrive-index; do
-              install -m0755 scripts/$s.sh $out/bin/gdrive-mounts-$s
+            mkdir -p $out/bin $out/libexec/gdrive-mounts $out/share/gdrive-mounts
+
+            # Every operator script becomes gdrive-mounts-<name>.
+            for s in scripts/*.sh; do
+              install -m0755 "$s" "$out/bin/gdrive-mounts-$(basename "$s" .sh)"
             done
+
+            # Shared shell library. Scripts look here when the in-repo copy is absent.
+            install -m0644 scripts/lib/common.sh $out/libexec/gdrive-mounts/common.sh
+
             install -m0644 orgs.json $out/share/gdrive-mounts/orgs.json
             install -m0644 config/rclone.conf.template $out/share/gdrive-mounts/rclone.conf.template
             install -m0644 config/orgs.schema.json $out/share/gdrive-mounts/orgs.schema.json
@@ -40,7 +46,7 @@
         checks = {
           # Structural validation of orgs.json + dummy-secret render + rclone parse.
           validate = pkgs.runCommand "gdrive-mounts-validate"
-            { nativeBuildInputs = [ pkgs.jq pkgs.rclone ]; }
+            { nativeBuildInputs = [ pkgs.jq pkgs.rclone pkgs.check-jsonschema ]; }
             ''
               cp -r ${self} work && chmod -R +w work && cd work
               bash scripts/validate-config.sh --quick
@@ -55,6 +61,14 @@
               gitleaks dir . --config .gitleaks.toml --redact --exit-code 1
               touch $out
             '';
+
+          # Home-manager module eval proof. Both platform branches run on every
+          # system, so an x86_64-linux runner still covers the Darwin units.
+          hm-eval = import ./nix/tests/hm-eval.nix {
+            inherit pkgs;
+            module = hmModule;
+            orgsFile = ./nix/tests/fixtures/orgs-test.json;
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -68,6 +82,10 @@
             pkgs.jq
             pkgs.sqlite
             pkgs.actionlint
+            pkgs.check-jsonschema
+            pkgs.shellcheck
+            pkgs.coreutils
+            pkgs.gnused
           ];
         };
 
