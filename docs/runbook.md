@@ -27,6 +27,12 @@ rclone processes — e.g. `~/GDrive/sulliwood-gftb-stuff` links to
 - Linux: `journalctl --user -u gdrive-mounts-*`
 - Mount-guard breadcrumbs (cache-volume wait, etc.):
   `<stateDir>/last-error.<org>-root`
+- Effective settings: `<stateDir>/effective-settings.json` — the paths, knobs,
+  backend, units and links the home-manager module actually resolved for this
+  host, rewritten at every switch. Non-secret (no secret path is ever written
+  into it), `0600`. `just doctor` prefers it over `orgs.json` `defaults`, so a
+  host that overrides `cacheRoot` or `mountRoot` is reported as it really is;
+  the file's absence means "not switched yet on this host".
 
 ## Lifecycle commands
 

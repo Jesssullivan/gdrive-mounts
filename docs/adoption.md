@@ -84,6 +84,10 @@ including "GFTB Stuff". A failing section: `docs/runbook.md`.
 | 5 — switched | resolved via sops paths | rendered, `0600` | running | absent until first index run |
 | 6 — `just index` or timer fires | — | — | running | fresh, within SLO |
 
+Before step 5 doctor reports the `orgs.json` defaults; from step 5 on it reads
+`<stateDir>/effective-settings.json` and reports this host's resolved settings,
+including any wrapper override — the `[config] settings` row names which.
+
 ## Per-org growth
 
 Adding an org after the first is a data-and-secrets change only: one

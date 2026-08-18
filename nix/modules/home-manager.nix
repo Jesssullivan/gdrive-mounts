@@ -245,6 +245,55 @@ let
       --best-effort
   '';
 
+  # What this module actually resolved, written where doctor can read it. A
+  # consumer overrides options per host, and those overrides never reach
+  # orgs.json — so orgs.json `defaults` is only doctor's pre-activation guess.
+  # Non-secret by construction: `cfg.secrets` is not read here, and must not be.
+  effectiveSettings = {
+    schema_version = 1;
+    inherit (settings)
+      stateDir
+      mountRoot
+      cacheRoot
+      cacheMaxSize
+      vfsCacheMode
+      dirCacheTime
+      vfsReadAhead
+      nfsCacheHandleLimit
+      indexStateDir
+      indexFreshnessSloHours
+      ;
+    inherit (cfg) platform;
+    backend = plan.backendFor { inherit (cfg) platform; inherit settings; };
+    orgsFile = "${cfg.orgsFile}";
+    units = map (u: {
+      org = u.org.name;
+      mount = u.mount.name;
+      inherit (u) point conf cache;
+    }) emission.units;
+    links = map (l: {
+      org = l.org.name;
+      name = l.link.name;
+      inherit (l) path target;
+    }) emission.links;
+  };
+
+  effectiveSettingsFile = pkgs.writeText "gdrive-mounts-effective-settings.json" (
+    builtins.toJSON effectiveSettings
+  );
+
+  effectiveSettingsPath = "${settings.stateDir}/effective-settings.json";
+
+  # Atomic 0600 install, same contract as every other file this repo creates:
+  # write beside the destination, then rename over it.
+  settingsActivation = ''
+    export PATH=${escapeShellArg runtimePath}
+    $DRY_RUN_CMD mkdir -p ${escapeShellArg settings.stateDir}
+    $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
+    $DRY_RUN_CMD install -m 600 ${effectiveSettingsFile} ${escapeShellArg "${effectiveSettingsPath}.new"}
+    $DRY_RUN_CMD mv -f ${escapeShellArg "${effectiveSettingsPath}.new"} ${escapeShellArg effectiveSettingsPath}
+  '';
+
   # Out-of-store symlinks: the target is a live mountpoint that does not exist
   # until rclone starts, so this is `ln -sfn`, not home.file.
   linkActivation = ''
@@ -506,6 +555,10 @@ in
         `secrets` entry. Their mounts are skipped. Seed the secret files and pass the paths,
         or set enabled=false in orgs.json.
       '';
+    }
+
+    {
+      home.activation.gdriveMountsSettings = lib.hm.dag.entryAfter cfg.activationAfter settingsActivation;
     }
 
     (mkIf (cfg.renderOnActivation && emission.wired != [ ]) {

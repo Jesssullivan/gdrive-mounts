@@ -4,6 +4,19 @@
 #
 # Exit 0 all OK, 1 at least one WARN, 2 at least one FAIL. A missing tool is a
 # FAIL row, not a crash, so the report is still readable on a bare machine.
+#
+# Settings source. A consumer sets programs.gdrive-mounts.<option> per host, and
+# that override never reaches orgs.json — so orgs.json `defaults` is only a
+# pre-activation guess. When `<stateDir>/effective-settings.json` exists (the
+# home-manager module writes it at every switch) doctor reports from it instead,
+# and says which source it used in the [config] section and as `settings_source`
+# in --json.
+#
+# Environment:
+#   GDRIVE_MOUNTS_STATE_DIR  state root to inspect, overriding orgs.json
+#                            `defaults.stateDir`. Point it at a scratch dir to
+#                            report on a state tree that is not this host's.
+#   GDRIVE_MOUNTS_ORGS       org registry, overriding the repo/package default.
 set -euo pipefail
 
 d="$(cd "$(dirname "$0")" && pwd)"
@@ -46,6 +59,7 @@ R_DETAIL=()
 SECTIONS=()
 N_FAIL=0
 N_WARN=0
+SETTINGS_SOURCE="unresolved (no readable org registry)"
 
 row() { # section id status detail
   R_SECTION+=("$1")
@@ -133,6 +147,7 @@ emit_and_exit() {
     printf '{"schema_version":1,'
     printf '"generated_at":"%s",' "$(json_escape "$now")"
     printf '"status":"%s",' "$status"
+    printf '"settings_source":"%s",' "$(json_escape "$SETTINGS_SOURCE")"
     printf '"sections":['
     local si=0 s i first_row
     for s in ${SECTIONS[@]+"${SECTIONS[@]}"}; do
@@ -180,6 +195,34 @@ CACHE_ROOT="$(expand_home "$(jq -r '.defaults.cacheRoot // "~/.cache/gdrive-moun
 CACHE_MAX="$(jq -r '.defaults.cacheMaxSize // "100G"' "$ORGS")"
 SLO_HOURS="$(jq -r '.defaults.indexFreshnessSloHours // 24' "$ORGS")"
 OS="$(gdm_os)"
+if [ "$OS" = darwin ]; then
+  BACKEND="$(jq -r '.defaults.mountBackendDarwin // "nfsmount"' "$ORGS")"
+else
+  BACKEND="$(jq -r '.defaults.mountBackendLinux // "mount"' "$ORGS")"
+fi
+SETTINGS_SOURCE="orgs.json defaults (no activation yet)"
+
+# ── effective settings (what the last activation actually used) ─────────────
+# The module writes this; a host override of cacheRoot/mountRoot lives here and
+# nowhere else. Absent means "not switched yet on this host", not an error.
+EFFECTIVE="$STATE/effective-settings.json"
+USE_EFFECTIVE=0
+eff_set() { # varname key — leave the current value alone when the key is absent
+  local v
+  v="$(jq -r --arg k "$2" '.[$k] // empty' "$EFFECTIVE")"
+  [ -n "$v" ] || return 0
+  printf -v "$1" '%s' "$v"
+}
+if [ -r "$EFFECTIVE" ] && jq -e 'type == "object"' "$EFFECTIVE" >/dev/null 2>&1; then
+  USE_EFFECTIVE=1
+  SETTINGS_SOURCE="effective-settings.json (activation-rendered)"
+  eff_set MOUNT_ROOT mountRoot
+  eff_set CACHE_ROOT cacheRoot
+  eff_set CACHE_MAX cacheMaxSize
+  eff_set INDEX_STATE indexStateDir
+  eff_set SLO_HOURS indexFreshnessSloHours
+  eff_set BACKEND backend
+fi
 
 # ── orgs ────────────────────────────────────────────────────────────────────
 while IFS= read -r org; do
@@ -227,6 +270,9 @@ while IFS= read -r org; do
 done < <(jq -c '.orgs[] | select(.enabled == true)' "$ORGS")
 
 # ── rendered configs ────────────────────────────────────────────────────────
+row config settings OK \
+  "$SETTINGS_SOURCE — backend=$BACKEND mountRoot=$MOUNT_ROOT cacheRoot=$CACHE_ROOT cap=$CACHE_MAX"
+
 while IFS= read -r name; do
   conf="$(conf_path "$STATE" "$name")"
   if [ ! -e "$conf" ]; then
@@ -312,48 +358,65 @@ agent_state() { # label unit
   [ "$out" = active ]
 }
 
-while IFS= read -r org; do
-  name="$(jq -r '.name' <<<"$org")"
-  root_suffix="$(jq -r '((.mounts // []) | map(select(.name == "root")) | .[0].mountSuffix) // ((.mounts // []) | .[0].mountSuffix) // ""' <<<"$org")"
-  while IFS= read -r m; do
-    [ -n "$m" ] || continue
-    mname="$(jq -r '.name' <<<"$m")"
-    suffix="$(jq -r '.mountSuffix' <<<"$m")"
-    point="$MOUNT_ROOT/$suffix"
-    if is_mountpoint "$point"; then
-      row mounts "$name.$mname" OK "mounted: $point"
-    elif [ -d "$point" ]; then
-      row mounts "$name.$mname" WARN "not mounted: $point"
-    else
-      row mounts "$name.$mname" WARN "mount point absent: $point"
-    fi
-    label="dev.tinyland.gdrive-mounts.$name-$mname"
-    unit="gdrive-mounts-$name-$mname.service"
-    if detail="$(agent_state "$label" "$unit")"; then
-      row mounts "$name.$mname.agent" OK "$detail"
-    else
-      row mounts "$name.$mname.agent" WARN "$detail ($label)"
-    fi
-  done < <(jq -c '(.mounts // [])[]' <<<"$org")
+# The unit and link inventory: what the module emitted when it has said so,
+# else the projection doctor can derive from the registry on its own.
+unit_inventory() { # org \t mount \t point
+  if [ "$USE_EFFECTIVE" = 1 ]; then
+    jq -r '(.units // [])[] | [.org, .mount, .point] | @tsv' "$EFFECTIVE"
+  else
+    jq -r --arg root "$MOUNT_ROOT" '
+      .orgs[] | select(.enabled == true) as $o
+      | ($o.mounts // [])[]
+      | [$o.name, .name, $root + "/" + .mountSuffix] | @tsv' "$ORGS"
+  fi
+}
 
-  while IFS= read -r l; do
-    [ -n "$l" ] || continue
-    lname="$(jq -r '.name' <<<"$l")"
-    target="$(jq -r '.target' <<<"$l")"
-    link="$MOUNT_ROOT/$name-$lname"
-    want="$MOUNT_ROOT/$root_suffix/$target"
-    if [ -L "$link" ]; then
-      have="$(readlink "$link")"
-      if [ "$have" = "$want" ]; then
-        row mounts "$name.$lname.link" OK "$link -> $want"
-      else
-        row mounts "$name.$lname.link" WARN "$link points at $have, expected $want"
-      fi
+link_inventory() { # org \t link \t path \t target
+  if [ "$USE_EFFECTIVE" = 1 ]; then
+    jq -r '(.links // [])[] | [.org, .name, .path, .target] | @tsv' "$EFFECTIVE"
+  else
+    jq -r --arg root "$MOUNT_ROOT" '
+      .orgs[] | select(.enabled == true) as $o
+      | ((($o.mounts // []) | map(select(.name == "root")) | .[0].mountSuffix)
+         // (($o.mounts // []) | .[0].mountSuffix) // "") as $suffix
+      | ($o.links // [])[]
+      | [$o.name, .name,
+         $root + "/" + $o.name + "-" + .name,
+         $root + "/" + $suffix + "/" + .target] | @tsv' "$ORGS"
+  fi
+}
+
+while IFS=$'\t' read -r name mname point; do
+  [ -n "$name" ] || continue
+  if is_mountpoint "$point"; then
+    row mounts "$name.$mname" OK "mounted: $point"
+  elif [ -d "$point" ]; then
+    row mounts "$name.$mname" WARN "not mounted: $point"
+  else
+    row mounts "$name.$mname" WARN "mount point absent: $point"
+  fi
+  label="dev.tinyland.gdrive-mounts.$name-$mname"
+  unit="gdrive-mounts-$name-$mname.service"
+  if detail="$(agent_state "$label" "$unit")"; then
+    row mounts "$name.$mname.agent" OK "$detail"
+  else
+    row mounts "$name.$mname.agent" WARN "$detail ($label)"
+  fi
+done < <(unit_inventory)
+
+while IFS=$'\t' read -r name lname link want; do
+  [ -n "$name" ] || continue
+  if [ -L "$link" ]; then
+    have="$(readlink "$link")"
+    if [ "$have" = "$want" ]; then
+      row mounts "$name.$lname.link" OK "$link -> $want"
     else
-      row mounts "$name.$lname.link" WARN "symlink absent: $link"
+      row mounts "$name.$lname.link" WARN "$link points at $have, expected $want"
     fi
-  done < <(jq -c '(.links // [])[]' <<<"$org")
-done < <(jq -c '.orgs[] | select(.enabled == true)' "$ORGS")
+  else
+    row mounts "$name.$lname.link" WARN "symlink absent: $link"
+  fi
+done < <(link_inventory)
 
 # ── index freshness ─────────────────────────────────────────────────────────
 now_epoch="$(date +%s)"
