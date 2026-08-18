@@ -11,7 +11,13 @@ into chat.
 - The cache volume is mounted (`/Volumes/TinylandSSD` on neo). Absent at
   mount time is a runbook failure mode, not an adoption blocker — see
   `docs/runbook.md`.
-- `nix develop` works in this repo (`.envrc` wires direnv).
+- `nix develop` works in this repo (`.envrc` wires direnv). On neo the
+  machine policy is remote-first (`max-jobs = 0`, one x86_64-linux builder,
+  no darwin builder), so realizing the darwin devShell needs a deliberate
+  local-build override once per shell:
+  `nix develop --option builders '' --option max-jobs auto`
+  (or `NIX_CONFIG=$'builders =\nmax-jobs = auto'`). Every `nix eval` on
+  neo takes 1–3 minutes; that is the machine, not the repo.
 - The org exists in `orgs.json` with `enabled: true`. Adding a new org later
   is a data change only — see "Per-org growth" below.
 

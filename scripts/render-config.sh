@@ -17,7 +17,11 @@ set -euo pipefail
 d="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/common.sh
-if [ -f "$d/lib/common.sh" ]; then . "$d/lib/common.sh"; else . "$d/../libexec/gdrive-mounts/common.sh"; fi
+for _c in "$d/lib/common.sh" "$d/scripts/lib/common.sh" "$d/../libexec/gdrive-mounts/common.sh"; do
+  # in-repo | bazel runfiles root (entrypoint renamed to the target name) | installed
+  if [ -f "$_c" ]; then . "$_c"; break; fi
+done
+type no_trace_guard >/dev/null 2>&1 || { echo "gdrive-mounts: common.sh not found next to $0" >&2; exit 70; }
 no_trace_guard
 
 usage() {
