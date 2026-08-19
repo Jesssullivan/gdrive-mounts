@@ -134,6 +134,131 @@ let
     ++ optionals (readOnly org) [ "--read-only" ]
     ++ extraFlags;
 
+  # ── generated-wrapper shell ─────────────────────────────────────────────────
+  #
+  # Text, not derivations: plan.nix stays pure, and the eval fixture can source
+  # the exact same text into a harness it executes. A guard that passes there is
+  # the guard that ships.
+
+  # Portable probes. `stat` is the trap: GNU takes `-c FORMAT`, BSD takes
+  # `-f FORMAT`, and the flags are not merely incompatible — GNU's `-f` is
+  # `--file-system`, so `stat -f %d` against GNU stat succeeds and prints a
+  # statfs report instead of a device number. The platform cannot decide this
+  # either, because the wrapper's PATH puts nix coreutils ahead of /usr/bin, so
+  # `stat` is GNU even on Darwin. Detect the implementation, exactly as
+  # `scripts/doctor.sh` already does.
+  #
+  # Defines: gdm_log, gdm_dev_of, gdm_perm_of, gdm_is_mountpoint,
+  # gdm_deepest_existing. Reads `$unit` for the log prefix.
+  shellPreamble = ''
+    # One timestamped line per phase, on stdout, so a wrapper that is stuck
+    # somewhere before rclone can be diagnosed from the launchd log alone.
+    gdm_log() {
+      printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" "$*"
+    }
+
+    if stat --version >/dev/null 2>&1; then
+      gdm_dev_of() { stat -c %d -- "$1" 2>/dev/null; }
+      # Mode and ownership, so a permission failure names what to fix.
+      gdm_perm_of() { stat -c '%A %U:%G' -- "$1" 2>/dev/null || printf 'mode unreadable'; }
+    else
+      gdm_dev_of() { stat -f %d -- "$1" 2>/dev/null; }
+      gdm_perm_of() { stat -f '%Sp %Su:%Sg' -- "$1" 2>/dev/null || printf 'mode unreadable'; }
+    fi
+
+    # Is a real filesystem mounted here? Fails closed: an unreadable probe is
+    # "not a mountpoint", never "yes" — the cache must not land on the boot
+    # disk because a stat call went wrong.
+    gdm_is_mountpoint() {
+      local p a b
+      p="$1"
+      [ -d "$p" ] || return 1
+      a="$(gdm_dev_of "$p")"
+      b="$(gdm_dev_of "$p/..")"
+      [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ]
+    }
+
+    # Deepest existing directory at or above $1, never above the floor $2.
+    # This is the directory `mkdir -p "$1"` will actually write into, so it is
+    # the one whose writability decides whether the cache can be created.
+    gdm_deepest_existing() {
+      local p floor
+      p="$1"
+      floor="$2"
+      while [ ! -d "$p" ]; do
+        case "$p" in
+          "$floor" | / | .) break ;;
+        esac
+        p="$(dirname -- "$p")"
+      done
+      printf '%s' "$p"
+    }
+  '';
+
+  # The cache-volume guard: a bounded wait, then one loud, distinguishable exit.
+  #
+  # Reads `$unit`, `$cache`, `$volume`, `$err`; needs shellPreamble sourced
+  # first. Defines gdm_cache_ready and gdm_wait_for_cache; the caller calls
+  # gdm_wait_for_cache.
+  #
+  # Writability is tested on the deepest existing ancestor of the cache
+  # directory, not on the volume root. An external volume's root is commonly
+  # root-owned (`/Volumes/<name>` mounts drwxr-xr-x root:wheel) while the
+  # user-owned cache subtree beneath it is perfectly writable, and testing the
+  # root turned that into an exit-78 respawn loop on neo, 2026-08-19.
+  cacheGuard =
+    {
+      requireMountpoint,
+      waitSeconds,
+      sleepSeconds ? 5,
+    }:
+    ''
+      require_mountpoint=${if requireMountpoint then "1" else "0"}
+
+      # Prints why the cache is not usable yet; empty output and rc 0 mean ready.
+      gdm_cache_ready() {
+        local anchor
+        if [ ! -d "$volume" ]; then
+          printf 'cache volume %s does not exist' "$volume"
+          return 1
+        fi
+        if [ "$require_mountpoint" = 1 ] && ! gdm_is_mountpoint "$volume"; then
+          printf 'cache volume %s is not a mountpoint (%s) — refusing to spill the cache onto the boot disk' \
+            "$volume" "$(gdm_perm_of "$volume")"
+          return 1
+        fi
+        anchor="$(gdm_deepest_existing "$cache" "$volume")"
+        if [ ! -w "$anchor" ]; then
+          printf 'cache dir %s cannot be created: %s is not writable by %s (%s)' \
+            "$cache" "$anchor" "$(id -un)" "$(gdm_perm_of "$anchor")"
+          return 1
+        fi
+        return 0
+      }
+
+      gdm_fail_cache() { # reason
+        printf 'FATAL gdrive-mounts %s: %s\n' "$unit" "$1" >&2
+        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$err"
+        gdm_log "guard: FATAL — $1 (exit 78)"
+        exit 78
+      }
+
+      gdm_wait_for_cache() {
+        local waited=0 why
+        while :; do
+          why="$(gdm_cache_ready)" && break
+          if [ "$waited" -ge ${toString waitSeconds} ]; then
+            gdm_fail_cache "$why (waited ''${waited}s)"
+          fi
+          gdm_log "guard: not ready — $why; retrying in ${toString sleepSeconds}s"
+          sleep ${toString sleepSeconds}
+          waited=$((waited + ${toString sleepSeconds}))
+        done
+        mkdir -p "$cache" || gdm_fail_cache "cache dir $cache could not be created under $volume"
+        gdm_log "guard: ready — volume $volume, cache $cache"
+      }
+    '';
+
   # The whole emission plan for one platform. `secretNames` are the org names
   # the consumer wired secrets for; an unwired org emits nothing but a warning.
   renderPlan =
@@ -203,5 +328,7 @@ in
     linkTarget
     mountArgs
     renderPlan
+    shellPreamble
+    cacheGuard
     ;
 }

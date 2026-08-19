@@ -102,6 +102,8 @@ let
   # The volume the cache lives on, not the cache directory itself.
   cacheVolume = plan.cacheVolume settings.cacheRoot;
 
+  backend = plan.backendFor { inherit (cfg) platform; inherit settings; };
+
   # Is anything mounted at the point? mount(8) on darwin, mountpoint(1) on linux.
   isMounted =
     point:
@@ -117,12 +119,16 @@ let
     else
       "fusermount3 -u ${escapeShellArg point} >/dev/null 2>&1 || umount -f ${escapeShellArg point} >/dev/null 2>&1 || true";
 
+  # Every phase logs one timestamped line before rclone replaces this process.
+  # Without it a wrapper that never reaches `exec` leaves an empty stdout log
+  # and an operator with nothing to read but a launchd exit status.
   mountScript =
     u:
     pkgs.writeShellScript "gdrive-mount-${u.name}" ''
       set -euo pipefail
       export PATH=${escapeShellArg runtimePath}
       ${secretExports u.org}
+      unit=${escapeShellArg u.name}
       state=${escapeShellArg settings.stateDir}
       conf=${escapeShellArg u.conf}
       point=${escapeShellArg u.point}
@@ -130,51 +136,48 @@ let
       volume=${escapeShellArg cacheVolume}
       err="$state/last-error.${u.org.name}-${u.mount.name}"
 
+      ${plan.shellPreamble}
+      ${plan.cacheGuard {
+        inherit (cfg.cache) requireMountpoint waitSeconds;
+      }}
+
+      gdm_log "start: pid $$, backend ${backend}, point $point"
+
       mkdir -p "$state"
       chmod 700 "$state" 2>/dev/null || true
       ${lib.optionalString (!cfg.cache.requireMountpoint) ''mkdir -p "$volume" >/dev/null 2>&1 || true''}
 
-      # Cache-volume guard: bounded wait, then fail loud. The cache never spills
-      # onto the boot disk.
-      waited=0
-      while :; do
-        ready=1
-        if [ ! -d "$volume" ] || [ ! -w "$volume" ]; then ready=0; fi
-        ${lib.optionalString cfg.cache.requireMountpoint ''
-          if [ "$ready" = 1 ] && [ "$(stat -c %d "$volume")" = "$(stat -c %d "$volume/..")" ]; then ready=0; fi
-        ''}
-        if [ "$ready" = 1 ]; then break; fi
-        if [ "$waited" -ge ${toString cfg.cache.waitSeconds} ]; then
-          printf 'FATAL gdrive-mounts %s: cache volume %s absent after %s seconds\n' \
-            ${escapeShellArg u.name} "$volume" ${toString cfg.cache.waitSeconds} >&2
-          printf '%s cache volume %s absent after %s seconds\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$volume" ${toString cfg.cache.waitSeconds} > "$err"
-          exit 78
-        fi
-        sleep 5
-        waited=$((waited + 5))
-      done
+      # Cache guard: bounded wait, then fail loud with exit 78. The cache never
+      # spills onto the boot disk.
+      gdm_wait_for_cache
 
       # Clear anything already mounted at the point (a dead NFS loopback left by
       # a killed rclone keeps answering stat from cache and hangs every real
       # read until it is force-unmounted). We are the only legitimate mounter
       # of this path and we are not running yet, so an existing mount is stale.
       if ${isMounted u.point}; then
+        gdm_log "sweep: stale mount at $point — force-unmounting"
         ${sweepStaleMount u.point}
+      else
+        gdm_log "sweep: nothing mounted at $point"
       fi
-      mkdir -p "$point" "$cache"
+      mkdir -p "$point"
       rm -f "$err"
 
       # Render only when the conf is missing. rclone owns the file after start:
       # it writes refreshed tokens back into it, and a re-render would undo them.
       if [ ! -s "$conf" ]; then
+        gdm_log "render: $conf is missing — rendering it from the template"
         ${renderBin} \
           --org ${escapeShellArg u.org.name} \
           --orgs ${escapeShellArg orgsFileArg} \
           --template ${escapeShellArg templateArg} \
           --out "$conf"
+      else
+        gdm_log "render: reusing $conf (rclone owns it after first start)"
       fi
 
+      gdm_log exec: rclone ${escapeShellArgs u.args}
       exec ${cfg.package}/bin/rclone ${escapeShellArgs u.args}
     '';
 
@@ -227,6 +230,10 @@ let
   indexScript = pkgs.writeShellScript "gdrive-mounts-index" ''
     set -euo pipefail
     export PATH=${escapeShellArg runtimePath}
+    unit="gdrive-mounts-index"
+    ${plan.shellPreamble}
+    gdm_log "start: pid $$, state ${settings.indexStateDir}"
+    gdm_log "exec: gdrive-mounts-gdrive-index"
     exec ${indexBin} \
       --orgs ${escapeShellArg orgsFileArg} \
       --conf-dir ${escapeShellArg settings.stateDir} \
@@ -264,7 +271,7 @@ let
       indexFreshnessSloHours
       ;
     inherit (cfg) platform;
-    backend = plan.backendFor { inherit (cfg) platform; inherit settings; };
+    inherit backend;
     orgsFile = "${cfg.orgsFile}";
     units = map (u: {
       org = u.org.name;

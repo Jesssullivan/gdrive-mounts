@@ -1,11 +1,16 @@
 # hm-eval — eval proof for programs.gdrive-mounts.
 #
-# Two layers:
+# Three layers:
 #   1. eval. lib.evalModules against a stub base module, once per platform.
 #      A failed check throws by name, so `nix eval .#checks.<system>.hm-eval.drvPath`
 #      is already the gate. No builder needed.
 #   2. build. runCommand greps the wrapper scripts the module actually generated,
 #      so the argv the tests assert is the argv that ships.
+#   3. behaviour. The same guard text plan.nix hands the module is sourced into a
+#      harness and *run* against synthetic directory trees, so the cache guard is
+#      proved by execution, not only by grep. Layer 3 caught the `stat -f` trap
+#      that layers 1 and 2 could not: GNU stat accepts `-f` and answers a
+#      different question.
 #
 # One instance per system evaluates both platform branches, so an x86_64-linux
 # runner still proves the Darwin units.
@@ -202,6 +207,50 @@ let
   linkEntry = darwinCfg.home.activation.gdriveMountsLinks;
   settingsEntry = darwinCfg.home.activation.gdriveMountsSettings;
 
+  # The guard text, straight from the builder the module uses. Layer 1 asserts
+  # its shape; layer 3 runs it.
+  guardFor =
+    requireMountpoint:
+    plan.cacheGuard {
+      inherit requireMountpoint;
+      waitSeconds = 0; # tests assert the fail-loud path, not the wait
+      sleepSeconds = 1;
+    };
+
+  # usage: harness <cache> <volume> <errfile>
+  guardHarness =
+    requireMountpoint:
+    pkgs.writeShellScript "gdrive-mounts-guard-harness" ''
+      set -euo pipefail
+      unit=harness
+      cache="$1"
+      volume="$2"
+      err="$3"
+      ${plan.shellPreamble}
+      ${guardFor requireMountpoint}
+      gdm_wait_for_cache
+      printf 'GUARD-READY\n'
+    '';
+
+  # usage: probe dev|mountpoint|deepest <path> [floor]
+  probeScript = pkgs.writeShellScript "gdrive-mounts-guard-probe" ''
+    set -euo pipefail
+    unit=probe
+    ${plan.shellPreamble}
+    case "$1" in
+      dev) gdm_dev_of "$2" || true ;;
+      mountpoint)
+        if gdm_is_mountpoint "$2"; then printf 'yes'; else printf 'no'; fi
+        ;;
+      deepest) gdm_deepest_existing "$2" "$3" ;;
+      *)
+        printf 'unknown probe: %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
+    printf '\n'
+  '';
+
   checks = [
     {
       name = "darwin-emits-one-agent-per-mount-plus-index";
@@ -329,6 +378,47 @@ let
       name = "production-orgs-json-unit-count-is-derived";
       ok = builtins.length (agentNames prodCfg) == prodMountCount + 1;
     }
+    # The stat dialect is detected, not assumed: `stat -c` is an illegal option
+    # to BSD stat, GNU's `-f` is `--file-system` (it succeeds and prints the
+    # wrong thing), and the platform cannot decide it either — the wrapper's
+    # PATH puts nix coreutils ahead of /usr/bin, so `stat` is GNU on Darwin too.
+    {
+      name = "stat-probe-detects-the-implementation";
+      ok =
+        let
+          p = plan.shellPreamble;
+        in
+        hasInfix "stat --version >/dev/null 2>&1" p && hasInfix "stat -c %d" p && hasInfix "stat -f %d" p;
+    }
+    # The neo 2026-08-19 regression: an external volume root is root-owned, so
+    # writability belongs to the cache subtree, not to the mountpoint itself.
+    {
+      name = "guard-tests-the-cache-ancestor-not-the-volume-root";
+      ok =
+        let
+          g = guardFor true;
+        in
+        hasInfix "gdm_deepest_existing \"$cache\" \"$volume\"" g && !(hasInfix ''! -w "$volume"'' g);
+    }
+    {
+      name = "guard-still-requires-a-real-mountpoint";
+      ok =
+        hasInfix "require_mountpoint=1" (guardFor true)
+        && hasInfix "require_mountpoint=0" (guardFor false)
+        && hasInfix "refusing to spill the cache onto the boot disk" (guardFor true);
+    }
+    {
+      name = "guard-failure-names-the-path-its-mode-and-exits-78";
+      ok =
+        let
+          g = guardFor true;
+        in
+        hasInfix "gdm_perm_of" g && hasInfix "is not writable by" g && hasInfix "exit 78" g;
+    }
+    {
+      name = "mountpoint-probe-fails-closed-on-an-unreadable-stat";
+      ok = hasInfix ''[ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ]'' plan.shellPreamble;
+    }
   ];
 
   failures = map (c: c.name) (filter (c: !c.ok) checks);
@@ -374,6 +464,29 @@ else
     # C6: the guard waits on the VOLUME mountpoint, not the cache root's parent
     # (the cache root sits in a user-owned subtree of a root-owned volume).
     grep -q "volume=/Volumes/TinylandSSD\b" "$dsul" || grep -q "volume='/Volumes/TinylandSSD'" "$dsul" || grep -q 'volume=/Volumes/TinylandSSD$' "$dsul"
+    # C6: …and it tests the cache subtree for writability, never the root-owned
+    # volume root, which is what respawn-looped neo on 2026-08-19.
+    grep -q 'gdm_deepest_existing "$cache" "$volume"' "$dsul"
+    ! grep -qF '! -w "$volume"' "$dsul"
+    # …and the cache root under /Volumes/ still demands a real mountpoint.
+    grep -qF 'require_mountpoint=1' "$dsul"
+
+    # The stat dialect is detected in the wrapper, on both platforms.
+    grep -qF 'stat --version >/dev/null 2>&1' "$dsul"
+    grep -qF 'stat -c %d' "$dsul"
+    grep -qF 'stat -f %d' "$dsul"
+    grep -qF 'stat --version >/dev/null 2>&1' "$lsul"
+
+    # Every phase logs one timestamped line before rclone replaces the process,
+    # so a wrapper stuck before `exec` is diagnosable from the log alone.
+    grep -qF 'date -u +%Y-%m-%dT%H:%M:%SZ' "$dsul"
+    grep -q 'gdm_log "start:' "$dsul"
+    grep -q 'gdm_log "guard:' "$dsul"
+    grep -q 'gdm_log "sweep:' "$dsul"
+    grep -q 'gdm_log "render:' "$dsul"
+    grep -q 'gdm_log exec: rclone' "$dsul"
+    grep -q 'gdm_log "start:' "$lsul"
+    grep -q 'gdm_log exec: rclone' "$lsul"
 
     # Render happens only when the config is missing; rclone owns it afterwards.
     grep -q 'gdrive-mounts-render-config' "$dsul"
@@ -394,5 +507,79 @@ else
     grep -q '"backend":"nfsmount"' "$doc"
     ! grep -q '/run/secrets' "$doc"
 
+    # ── layer 3: run the guard against real directory trees ───────────────────
+    harness=${guardHarness false}
+    harnessmp=${guardHarness true}
+    probe=${probeScript}
+    t="$PWD/guard-t"
+    mkdir -p "$t"
+
+    if [ "$(id -u)" = 0 ]; then
+      echo "note: builder is uid 0, mode bits do not deny — skipping the negative-writability scenario"
+    fi
+
+    # The probes must work on this builder. A wrong stat flag prints nothing,
+    # which is exactly how the mountpoint test degraded silently.
+    dev="$("$probe" dev "$t")"
+    case "$dev" in
+      "" | *[!0-9]*)
+        echo "gdm_dev_of returned a non-numeric device: '$dev'" >&2
+        exit 1
+        ;;
+    esac
+    [ -z "$("$probe" dev "$t/absent")" ]
+    [ "$("$probe" mountpoint "$t")" = no ]
+    [ "$("$probe" mountpoint "$t/absent")" = no ]   # fails closed
+    if [ -d /proc/self ]; then [ "$("$probe" mountpoint /proc)" = yes ]; fi
+
+    mkdir -p "$t/deep/a/b"
+    [ "$("$probe" deepest "$t/deep/a/b/c/d" "$t/deep")" = "$t/deep/a/b" ]
+    [ "$("$probe" deepest "$t/deep" "$t/deep")" = "$t/deep" ]
+
+    # 1. The neo regression. Volume root unwritable, cache subtree writable:
+    #    the guard must pass and create the cache dir.
+    mkdir -p "$t/vol1/tinyland/gdrive-cache"
+    chmod 0555 "$t/vol1"
+    "$harness" "$t/vol1/tinyland/gdrive-cache/sulliwood" "$t/vol1" "$t/err1" > "$t/out1"
+    grep -q GUARD-READY "$t/out1"
+    grep -q 'guard: ready' "$t/out1"
+    [ -d "$t/vol1/tinyland/gdrive-cache/sulliwood" ]
+    [ ! -e "$t/err1" ]
+
+    # 2. A genuinely unwritable cache ancestor still fails loud, naming it.
+    if [ "$(id -u)" != 0 ]; then
+      mkdir -p "$t/vol2/tinyland"
+      chmod 0555 "$t/vol2/tinyland"
+      rc=0
+      "$harness" "$t/vol2/tinyland/gdrive-cache/sulliwood" "$t/vol2" "$t/err2" \
+        > "$t/out2" 2> "$t/e2" || rc=$?
+      [ "$rc" = 78 ]
+      grep -q 'is not writable by' "$t/e2"
+      grep -qF "$t/vol2/tinyland" "$t/e2"
+      grep -qF "gdrive-cache/sulliwood" "$t/e2"
+      [ -s "$t/err2" ]
+    fi
+
+    # 3. An absent volume names the volume, not a generic "cache absent".
+    rc=0
+    "$harness" "$t/vol3/cache" "$t/vol3" "$t/err3" > "$t/out3" 2> "$t/e3" || rc=$?
+    [ "$rc" = 78 ]
+    grep -qF "cache volume $t/vol3 does not exist" "$t/e3"
+
+    # 4. Create-if-missing: the whole cache path may be absent.
+    mkdir -p "$t/vol4"
+    "$harness" "$t/vol4/a/b/c" "$t/vol4" "$t/err4" > "$t/out4"
+    grep -q GUARD-READY "$t/out4"
+    [ -d "$t/vol4/a/b/c" ]
+
+    # 5. Never spill onto the boot disk: a plain directory is not a volume.
+    mkdir -p "$t/vol5/tinyland"
+    rc=0
+    "$harnessmp" "$t/vol5/tinyland/cache" "$t/vol5" "$t/err5" > "$t/out5" 2> "$t/e5" || rc=$?
+    [ "$rc" = 78 ]
+    grep -q 'is not a mountpoint' "$t/e5"
+    [ ! -d "$t/vol5/tinyland/cache" ]
+
+    chmod -R u+w "$t" 2>/dev/null || true
     touch $out
   ''
