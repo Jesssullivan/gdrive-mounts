@@ -19,9 +19,10 @@ just doctor                          # live state, once secrets are wired
 
 Secrets enter as file paths, never values. `orgs.json` and `nix/lib/plan.nix`
 decide every path and every rclone flag. The home-manager module turns that
-plan into one launchd agent (or systemd --user service) per org mount, plus one
-index unit. Each agent runs a generated wrapper that guards the cache volume,
-sweeps a stale mount, renders the config once, and then `exec`s rclone.
+plan into one launchd agent (or systemd --user service) per org mount, one
+health watchdog beside each, plus one index unit. Each agent runs a generated
+wrapper that guards the cache volume, sweeps a stale mount, renders the config
+once, and then `exec`s rclone.
 
 ```mermaid
 flowchart TB
@@ -44,6 +45,7 @@ flowchart TB
 
   subgraph units["launchd agents / systemd --user units"]
     agent["dev.tinyland.gdrive-mounts.&lt;org&gt;-root"]
+    watch["…&lt;org&gt;-root.watchdog<br/>probe · confirm · capture · restart"]
     idx["dev.tinyland.gdrive-mounts.index"]
   end
 
@@ -66,16 +68,27 @@ flowchart TB
   rclone --> mounts
   rclone <--> cache
   idx --> db
+  wedge["wedge.&lt;org&gt;-root.jsonl<br/>+ goroutine dump, captured before the restart"]
+  mounts -.->|"probe: mount table, nfsstat, bounded stat"| watch
+  watch -->|"2 consecutive failures"| agent
+  watch --> wedge
   eff -.-> doctor
   mounts -.-> doctor
   cache -.-> doctor
   db -.-> doctor
+  wedge -.-> doctor
 ```
 
 Every wrapper phase — start, guard, sweep, render, exec — writes one timestamped
 line to the agent's stdout log, so a wrapper that never reaches rclone is
-diagnosable from the log alone. Exit codes and operator probes:
-`docs/runbook.md`.
+diagnosable from the log alone.
+
+The watchdog exists because the failure this system actually has is invisible to
+a supervisor: the mount stops serving while every process stays alive and
+healthy, so nothing fails, `KeepAlive` never fires, and nothing is logged. Both
+observed forms, with goroutine dumps, are in
+[`docs/evidence/2026-08-19-nfs-wedge.md`](docs/evidence/2026-08-19-nfs-wedge.md).
+Exit codes, wedge records and operator probes: `docs/runbook.md`.
 
 ## Layout
 

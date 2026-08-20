@@ -12,7 +12,21 @@
     "indexStateDir": "~/.local/state/gdrive-index",
     "indexFreshnessSloHours": 24,
     "mountBackendDarwin": "nfsmount",
-    "mountBackendLinux": "mount"
+    "mountBackendLinux": "mount",
+    "ioTimeout": "20s",
+    "connectTimeout": "10s",
+    "lowLevelRetries": 3,
+    "attrTimeout": "5s",
+    "pollInterval": "5m",
+    "logLevel": "INFO",
+    "statsInterval": "0",
+    "nfsMountOptions": ["soft", "intr", "timeo=100", "retrans=5", "dumbtimer"],
+    "remoteControl": true,
+    "watchdogEnable": true,
+    "watchdogIntervalSec": 60,
+    "watchdogProbeTimeoutSec": 10,
+    "watchdogFailureThreshold": 2,
+    "watchdogRestartFloorSec": 300
   },
   "orgs": [
     {

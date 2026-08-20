@@ -52,9 +52,23 @@ let
       nfsCacheHandleLimit
       backendDarwin
       backendLinux
+      ioTimeout
+      connectTimeout
+      lowLevelRetries
+      attrTimeout
+      pollInterval
+      logLevel
+      statsInterval
+      nfsMountOptions
       ;
     indexStateDir = cfg.index.stateDir;
     indexFreshnessSloHours = cfg.index.freshnessSloHours;
+    remoteControl = cfg.remoteControl.enable;
+    watchdogEnable = cfg.watchdog.enable;
+    watchdogIntervalSec = cfg.watchdog.intervalSec;
+    watchdogProbeTimeoutSec = cfg.watchdog.probeTimeoutSec;
+    watchdogFailureThreshold = cfg.watchdog.failureThreshold;
+    watchdogRestartFloorSec = cfg.watchdog.restartFloorSec;
   };
 
   secretNames = builtins.attrNames cfg.secrets;
@@ -102,7 +116,10 @@ let
   # The volume the cache lives on, not the cache directory itself.
   cacheVolume = plan.cacheVolume settings.cacheRoot;
 
-  backend = plan.backendFor { inherit (cfg) platform; inherit settings; };
+  backend = plan.backendFor {
+    inherit (cfg) platform;
+    inherit settings;
+  };
 
   # Is anything mounted at the point? mount(8) on darwin, mountpoint(1) on linux.
   isMounted =
@@ -110,7 +127,7 @@ let
     if cfg.platform == "darwin" then
       ''mount | grep -qF " on ${point} ("''
     else
-      ''mountpoint -q ${escapeShellArg point}'';
+      "mountpoint -q ${escapeShellArg point}";
 
   sweepStaleMount =
     point:
@@ -118,6 +135,42 @@ let
       "umount -f ${escapeShellArg point} >/dev/null 2>&1 || true"
     else
       "fusermount3 -u ${escapeShellArg point} >/dev/null 2>&1 || umount -f ${escapeShellArg point} >/dev/null 2>&1 || true";
+
+  # Is anything mounted here, WITHOUT touching the filesystem? The watchdog asks
+  # this about a mount that may be wedged, where `mountpoint -q` — which stats
+  # the path — would block forever in the kernel. mount(8) and /proc/self/mounts
+  # both read the kernel's mount table instead.
+  isMountedNonBlocking =
+    point:
+    if cfg.platform == "darwin" then
+      ''mount | grep -qF " on ${point} ("''
+    else
+      "awk -v p=${escapeShellArg point} '$2 == p { found = 1 } END { exit !found }' /proc/self/mounts";
+
+  mountLabel = u: "dev.tinyland.gdrive-mounts.${u.org.name}-${u.mount.name}";
+
+  # The mount unit's pid. Both supervisors report the pid of the process they
+  # started, and the wrapper `exec`s rclone, so that pid IS rclone's.
+  unitPidCommand =
+    u:
+    if cfg.platform == "darwin" then
+      ''launchctl list ${escapeShellArg (mountLabel u)} 2>/dev/null | sed -n 's/.*"PID" = \([0-9]*\);.*/\1/p' | head -1''
+    else
+      "systemctl --user show -p MainPID --value ${escapeShellArg "${u.name}.service"} 2>/dev/null | grep -v '^0$' || true";
+
+  unitActiveCheck =
+    u:
+    if cfg.platform == "darwin" then
+      "launchctl list ${escapeShellArg (mountLabel u)} >/dev/null 2>&1"
+    else
+      "systemctl --user is-active --quiet ${escapeShellArg "${u.name}.service"}";
+
+  restartCommand =
+    u:
+    if cfg.platform == "darwin" then
+      ''launchctl kickstart -k "gui/$(id -u)/${mountLabel u}" >/dev/null 2>&1 || true''
+    else
+      "systemctl --user restart ${escapeShellArg "${u.name}.service"} >/dev/null 2>&1 || true";
 
   # Every phase logs one timestamped line before rclone replaces this process.
   # Without it a wrapper that never reaches `exec` leaves an empty stdout log
@@ -134,6 +187,7 @@ let
       point=${escapeShellArg u.point}
       cache=${escapeShellArg u.cache}
       volume=${escapeShellArg cacheVolume}
+      sock=${escapeShellArg u.sock}
       err="$state/last-error.${u.org.name}-${u.mount.name}"
 
       ${plan.shellPreamble}
@@ -155,14 +209,35 @@ let
       # a killed rclone keeps answering stat from cache and hangs every real
       # read until it is force-unmounted). We are the only legitimate mounter
       # of this path and we are not running yet, so an existing mount is stale.
+      #
+      # The sweep must be *asserted*, not attempted. `umount -f` against a
+      # `hard,nointr` mount whose callers are blocked in RPC can return EBUSY,
+      # and a swallowed failure means the next line mounts on top of the corpse:
+      # a live process, a listening port, and a client still addressed to the
+      # dead one. Silent, and indistinguishable from the wedge it causes.
       if ${isMounted u.point}; then
         gdm_log "sweep: stale mount at $point — force-unmounting"
         ${sweepStaleMount u.point}
+        if ${isMounted u.point}; then
+          gdm_log "sweep: FAILED — $point is still mounted (exit 75)"
+          printf 'FATAL gdrive-mounts %s: stale mount at %s survived the force-unmount\n' "$unit" "$point" >&2
+          printf '%s stale mount at %s survived the force-unmount\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$point" > "$err"
+          exit 75
+        fi
+        gdm_log "sweep: clear"
       else
         gdm_log "sweep: nothing mounted at $point"
       fi
       mkdir -p "$point"
       rm -f "$err"
+
+      # rclone binds the rc socket itself and will not bind over an existing
+      # file, so a socket left by a killed process is a start failure.
+      if [ -n "$sock" ]; then
+        rm -f "$sock"
+        gdm_log "rc: serving the remote-control API on $sock (unix socket, inside the 0700 state dir)"
+      fi
 
       # Render only when the conf is missing. rclone owns the file after start:
       # it writes refreshed tokens back into it, and a re-render would undo them.
@@ -179,6 +254,46 @@ let
 
       gdm_log exec: rclone ${escapeShellArgs u.args}
       exec ${cfg.package}/bin/rclone ${escapeShellArgs u.args}
+    '';
+
+  # The health-probe sidecar. One per mount, supervised alongside it, never in
+  # the same process: a watchdog that shares a fate with the thing it watches is
+  # not a watchdog.
+  watchdogScript =
+    u:
+    pkgs.writeShellScript "gdrive-mounts-watchdog-${u.name}" ''
+      set -euo pipefail
+      export PATH=${escapeShellArg runtimePath}
+      unit=${escapeShellArg "${u.name}-watchdog"}
+      state=${escapeShellArg settings.stateDir}
+      point=${escapeShellArg u.point}
+      record=${escapeShellArg u.watchdog.record}
+      capture=${escapeShellArg u.watchdog.capture}
+      floor_file=${escapeShellArg u.watchdog.floorFile}
+      probe_dir=${escapeShellArg u.watchdog.probeDir}
+      sock=${escapeShellArg u.sock}
+      rclone_bin=${cfg.package}/bin/rclone
+
+      ${plan.shellPreamble}
+      ${plan.watchdogShell {
+        intervalSec = cfg.watchdog.intervalSec;
+        probeTimeoutSec = cfg.watchdog.probeTimeoutSec;
+        failureThreshold = cfg.watchdog.failureThreshold;
+        restartFloorSec = cfg.watchdog.restartFloorSec;
+        # Derived, never a knob of its own: it must never be shorter than the
+        # cache guard's own budget, or the watchdog would restart a mount that
+        # is legitimately still waiting for its volume.
+        mountGraceSec = cfg.cache.waitSeconds + 180;
+        nfsStatus = cfg.platform == "darwin" && backend == "nfsmount";
+        mountedCheck = isMountedNonBlocking u.point;
+        unitActiveCheck = unitActiveCheck u;
+        unitPidCommand = unitPidCommand u;
+        restartCommand = restartCommand u;
+      }}
+
+      mkdir -p "$state" "$probe_dir"
+      chmod 700 "$state" 2>/dev/null || true
+      gdm_watch_loop
     '';
 
   logDir = "${config.home.homeDirectory}/Library/Logs/tinyland";
@@ -207,6 +322,30 @@ let
     ) emission.units
   );
 
+  watchdogAgents = lib.listToAttrs (
+    map (
+      u:
+      nameValuePair "${u.name}-watchdog" {
+        enable = true;
+        config = {
+          Label = "${mountLabel u}.watchdog";
+          ProgramArguments = [ "${watchdogScript u}" ];
+          RunAtLoad = true;
+          # Unconditional: this is a supervision loop, so a clean exit is still
+          # an absence of supervision.
+          KeepAlive = true;
+          ThrottleInterval = 30;
+          ProcessType = "Background";
+          EnvironmentVariables = {
+            PATH = runtimePath;
+          };
+          StandardOutPath = "${logDir}/gdrive-mounts.${u.org.name}-${u.mount.name}.watchdog.log";
+          StandardErrorPath = "${logDir}/gdrive-mounts.${u.org.name}-${u.mount.name}.watchdog.err.log";
+        };
+      }
+    ) emission.units
+  );
+
   mountServices = lib.listToAttrs (
     map (
       u:
@@ -220,6 +359,29 @@ let
           ExecStart = "${mountScript u}";
           Environment = [ "PATH=${runtimePath}" ];
           Restart = "on-failure";
+          RestartSec = 30;
+        };
+        Install.WantedBy = [ "default.target" ];
+      }
+    ) emission.units
+  );
+
+  watchdogServices = lib.listToAttrs (
+    map (
+      u:
+      nameValuePair "${u.name}-watchdog" {
+        Unit = {
+          Description = "gdrive-mounts health watchdog for ${u.point}";
+          # After, deliberately not PartOf or BindsTo: the watchdog stands down
+          # by itself when the mount unit is inactive, and coupling the two would
+          # take the watchdog down in the middle of the restart it just ordered —
+          # losing the wedge record that makes recurrence measurable.
+          After = [ "${u.name}.service" ];
+        };
+        Service = {
+          ExecStart = "${watchdogScript u}";
+          Environment = [ "PATH=${runtimePath}" ];
+          Restart = "always";
           RestartSec = 30;
         };
         Install.WantedBy = [ "default.target" ];
@@ -269,6 +431,20 @@ let
       nfsCacheHandleLimit
       indexStateDir
       indexFreshnessSloHours
+      ioTimeout
+      connectTimeout
+      lowLevelRetries
+      attrTimeout
+      pollInterval
+      logLevel
+      statsInterval
+      nfsMountOptions
+      remoteControl
+      watchdogEnable
+      watchdogIntervalSec
+      watchdogProbeTimeoutSec
+      watchdogFailureThreshold
+      watchdogRestartFloorSec
       ;
     inherit (cfg) platform;
     inherit backend;
@@ -276,7 +452,15 @@ let
     units = map (u: {
       org = u.org.name;
       mount = u.mount.name;
-      inherit (u) point conf cache;
+      inherit (u)
+        point
+        conf
+        cache
+        sock
+        ;
+      watchdogRecord = u.watchdog.record;
+      watchdogLabel =
+        if cfg.platform == "darwin" then "${mountLabel u}.watchdog" else "${u.name}-watchdog.service";
     }) emission.units;
     links = map (l: {
       org = l.org.name;
@@ -309,6 +493,26 @@ let
       l: "$DRY_RUN_CMD ln -sfn ${escapeShellArg l.target} ${escapeShellArg l.path}\n"
     ) emission.links}
   '';
+
+  # A soft mount lets a stalled RPC fail with EIO instead of blocking forever.
+  # On a read-only mount that is exactly what we want — the failure is
+  # recoverable and, crucially, visible to the watchdog. On a read-write mount
+  # the same EIO can surface mid-write, so `soft` there is a data-durability
+  # decision an operator has to make deliberately, not inherit from a default
+  # written for read-only Drive browsing. Fail closed rather than gate silently:
+  # a silent per-org downgrade would be the more dangerous behaviour, because
+  # nothing would tell anyone that promoting an org had changed write semantics.
+  writableUnits = lib.filter (u: !u.readOnly) emission.units;
+
+  softMountViolations =
+    lib.optional
+      (
+        backend == "nfsmount"
+        && lib.elem "soft" settings.nfsMountOptions
+        && writableUnits != [ ]
+        && !cfg.allowSoftReadWrite
+      )
+      (lib.concatStringsSep ", " (map (u: "${u.org.name}-${u.mount.name}") writableUnits));
 
   storeViolations = lib.concatMap (
     name:
@@ -471,6 +675,180 @@ in
       description = "rclone subcommand on Linux.";
     };
 
+    ioTimeout = mkOption {
+      type = types.str;
+      default = fromRegistry.ioTimeout;
+      defaultText = literalMD "`orgs.json` `defaults.ioTimeout`";
+      description = ''
+        rclone `--timeout` (IO idle). Deliberately far below rclone's own 5m
+        default: macOS marks an NFS mount "not responding" after
+        `vfs.generic.nfs.client.initialdowndelay` seconds, which is 5, and
+        `hard,nointr` then makes that state permanent.
+      '';
+    };
+
+    connectTimeout = mkOption {
+      type = types.str;
+      default = fromRegistry.connectTimeout;
+      defaultText = literalMD "`orgs.json` `defaults.connectTimeout`";
+      description = "rclone --contimeout. Same budget as ioTimeout.";
+    };
+
+    lowLevelRetries = mkOption {
+      type = types.int;
+      default = fromRegistry.lowLevelRetries;
+      defaultText = literalMD "`orgs.json` `defaults.lowLevelRetries`";
+      description = "rclone --low-level-retries. Multiplies ioTimeout into the worst-case stall.";
+    };
+
+    attrTimeout = mkOption {
+      type = types.str;
+      default = fromRegistry.attrTimeout;
+      defaultText = literalMD "`orgs.json` `defaults.attrTimeout`";
+      description = "rclone --attr-timeout.";
+    };
+
+    pollInterval = mkOption {
+      type = types.str;
+      default = fromRegistry.pollInterval;
+      defaultText = literalMD "`orgs.json` `defaults.pollInterval`";
+      description = "rclone --poll-interval for backend change notification.";
+    };
+
+    logLevel = mkOption {
+      type = types.enum [
+        "DEBUG"
+        "INFO"
+        "NOTICE"
+        "ERROR"
+      ];
+      default = fromRegistry.logLevel;
+      defaultText = literalMD "`orgs.json` `defaults.logLevel`";
+      description = ''
+        rclone --log-level. rclone logs low-level retries and pacer backoff at
+        INFO, so at the NOTICE default a stalling mount genuinely logs nothing.
+      '';
+    };
+
+    statsInterval = mkOption {
+      type = types.str;
+      default = fromRegistry.statsInterval;
+      defaultText = literalMD "`orgs.json` `defaults.statsInterval`";
+      description = ''
+        rclone --stats. `"0"` disables the periodic stats block. launchd never
+        rotates a log, and the watchdog heartbeat already carries liveness.
+      '';
+    };
+
+    nfsMountOptions = mkOption {
+      type = types.listOf types.str;
+      default = fromRegistry.nfsMountOptions;
+      defaultText = literalMD "`orgs.json` `defaults.nfsMountOptions`";
+      example = literalExpression ''[ "intr" "timeo=100" "retrans=5" "dumbtimer" ]'';
+      description = ''
+        NFS client mount options, emitted one per `--option`. Emitted only when
+        the backend is `nfsmount`; on `rclone mount` the same flag means libfuse
+        options, which these are not.
+
+        These are not interpreted by rclone. On Darwin `rclone nfsmount` runs
+        `mount -o port=N -o mountport=N -o tcp <our options> localhost:/ <point>`,
+        and `mount(8)` execs `/sbin/mount_nfs` for a `host:/path` special — so
+        they land in the kernel NFS client. rclone hardcodes only
+        `port`/`mountport`/`tcp`; everything else, including `hard` and
+        `nointr`, is a macOS default it never chose.
+
+        The default trades rclone's stubbornness for a mount that can recover:
+        `soft`+`intr` make a stalled call fail with `EIO` and make its caller
+        killable, instead of blocking forever in the kernel where no signal is
+        delivered — the state that made the 2026-08-19 wedge bistable and left
+        the watchdog unable even to probe it. `timeo` is in **tenths of a
+        second** on macOS, so `timeo=100` is 10s, and `dumbtimer` keeps the
+        dynamic retransmit estimator from deriving a microsecond timeout from
+        the loopback round-trip.
+
+        `soft` can surface a stalled write as an I/O error, so it is refused on
+        a read-write org (see the assertion). Confirm any change actually landed
+        with `nfsstat -m`; never assume it did.
+      '';
+    };
+
+    allowSoftReadWrite = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Permit `soft` in `nfsMountOptions` while a read-write mount exists.
+
+        Off by default, and the resulting assertion is the point: `soft` turns a
+        stalled RPC into `EIO`, which is the right trade for read-only Drive
+        browsing and a data-durability decision on a mount that accepts writes.
+        Promoting an org to `scope = "drive"` should not silently change what
+        happens to an in-flight write.
+      '';
+    };
+
+    remoteControl.enable = mkOption {
+      type = types.bool;
+      default = fromRegistry.remoteControl;
+      defaultText = literalMD "`orgs.json` `defaults.remoteControl`";
+      description = ''
+        Serve rclone's rc API for each mount on a unix socket inside `stateDir`.
+        Never a TCP port: `--rc-no-auth` on loopback is reachable by every local
+        process, and rc can drive the VFS. The socket is created world-
+        connectable (`srwxr-xr-x`), so the 0700 `stateDir` is the access control.
+
+        The watchdog uses it to read `core/stats`, `core/pid` and `vfs/stats`
+        while a mount is wedged — over a channel that never touches the wedged
+        path, which is what separates "rclone is dead" from "rclone is alive and
+        the NFS layer went quiet".
+      '';
+    };
+
+    watchdog = {
+      enable = mkOption {
+        type = types.bool;
+        default = fromRegistry.watchdogEnable;
+        defaultText = literalMD "`orgs.json` `defaults.watchdogEnable`";
+        description = ''
+          Run a health-probe sidecar unit per mount. It probes from outside,
+          confirms across consecutive cycles, captures, and restarts the mount
+          unit. Without it, a mount that stops serving while every process
+          involved stays alive is never restarted — nothing has failed.
+        '';
+      };
+      intervalSec = mkOption {
+        type = types.int;
+        default = fromRegistry.watchdogIntervalSec;
+        defaultText = literalMD "`orgs.json` `defaults.watchdogIntervalSec`";
+        description = "Seconds between probes.";
+      };
+      probeTimeoutSec = mkOption {
+        type = types.int;
+        default = fromRegistry.watchdogProbeTimeoutSec;
+        defaultText = literalMD "`orgs.json` `defaults.watchdogProbeTimeoutSec`";
+        description = "How long a bounded filesystem probe may take before it counts as a failure.";
+      };
+      failureThreshold = mkOption {
+        type = types.int;
+        default = fromRegistry.watchdogFailureThreshold;
+        defaultText = literalMD "`orgs.json` `defaults.watchdogFailureThreshold`";
+        description = ''
+          Consecutive failed probes before the watchdog acts. Never 1: the
+          macOS "not responding" flag is observed to set and clear on its own
+          within a single minute.
+        '';
+      };
+      restartFloorSec = mkOption {
+        type = types.int;
+        default = fromRegistry.watchdogRestartFloorSec;
+        defaultText = literalMD "`orgs.json` `defaults.watchdogRestartFloorSec`";
+        description = ''
+          Minimum seconds between watchdog restarts of one mount. Held wedges
+          are still written to the wedge record, so the floor suppresses the
+          restart, never the evidence.
+        '';
+      };
+    };
+
     extraMountFlags = mkOption {
       type = types.listOf types.str;
       default = [ ];
@@ -555,6 +933,25 @@ in
             config.sops.secrets."gdrive-mounts/<org>/client".path, never a path literal.
           '';
         }
+        {
+          assertion = softMountViolations == [ ];
+          message = ''
+            programs.gdrive-mounts: nfsMountOptions contains `soft`, but mount(s)
+            ${lib.concatStringsSep ", " softMountViolations} are read-write.
+
+            A soft mount fails a stalled RPC with EIO instead of blocking, which is
+            what we want for read-only Drive browsing — but that EIO can also land
+            mid-write. Decide deliberately:
+
+              # keep hard semantics everywhere (safe, but a stall stays permanent)
+              programs.gdrive-mounts.nfsMountOptions =
+                [ "intr" "timeo=100" "retrans=5" "dumbtimer" ];
+
+            or, having considered the write path, accept the trade explicitly:
+
+              programs.gdrive-mounts.allowSoftReadWrite = true;
+          '';
+        }
       ];
 
       warnings = optional (emission.unwired != [ ]) ''
@@ -578,6 +975,11 @@ in
 
     (mkIf (cfg.platform == "darwin") { launchd.agents = mountAgents; })
     (mkIf (cfg.platform == "linux") { systemd.user.services = mountServices; })
+
+    (mkIf (cfg.watchdog.enable && emission.units != [ ]) (mkMerge [
+      (mkIf (cfg.platform == "darwin") { launchd.agents = watchdogAgents; })
+      (mkIf (cfg.platform == "linux") { systemd.user.services = watchdogServices; })
+    ]))
 
     (mkIf (cfg.index.enable && emission.wired != [ ]) (mkMerge [
       (mkIf (cfg.platform == "darwin") {

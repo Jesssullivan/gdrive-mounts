@@ -23,7 +23,21 @@
         "indexStateDir",
         "indexFreshnessSloHours",
         "mountBackendDarwin",
-        "mountBackendLinux"
+        "mountBackendLinux",
+        "ioTimeout",
+        "connectTimeout",
+        "lowLevelRetries",
+        "attrTimeout",
+        "pollInterval",
+        "logLevel",
+        "statsInterval",
+        "nfsMountOptions",
+        "remoteControl",
+        "watchdogEnable",
+        "watchdogIntervalSec",
+        "watchdogProbeTimeoutSec",
+        "watchdogFailureThreshold",
+        "watchdogRestartFloorSec"
       ],
       "additionalProperties": false,
       "properties": {
@@ -54,7 +68,76 @@
         "indexStateDir": { "type": "string", "minLength": 1 },
         "indexFreshnessSloHours": { "type": "integer", "minimum": 1 },
         "mountBackendDarwin": { "enum": ["nfsmount", "mount"] },
-        "mountBackendLinux": { "const": "mount" }
+        "mountBackendLinux": { "const": "mount" },
+        "ioTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "rclone --timeout (IO idle). Must stay well under the NFS client's patience: macOS marks a mount 'not responding' after vfs.generic.nfs.client.initialdowndelay seconds (5). rclone's own default is 5m, which is what wedged neo on 2026-08-19."
+        },
+        "connectTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "rclone --contimeout (connect). Same reasoning as ioTimeout; rclone's default is 1m."
+        },
+        "lowLevelRetries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "description": "rclone --low-level-retries. Multiplies ioTimeout into the worst-case stall, so it is part of the same budget: 5m x 10 is up to 50 minutes on one operation."
+        },
+        "attrTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "rclone --attr-timeout. How long the kernel may trust cached attributes before asking again."
+        },
+        "pollInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "rclone --poll-interval for backend change notification. A long dirCacheTime makes polling mandatory, and the poll is itself backend traffic that can stall — keep it far below dirCacheTime but not aggressive."
+        },
+        "logLevel": {
+          "enum": ["DEBUG", "INFO", "NOTICE", "ERROR"],
+          "description": "rclone --log-level. At the NOTICE default rclone logs neither low-level retries nor pacer backoff, which is why the 2026-08-19 wedge presented as 'no error ever logged'."
+        },
+        "statsInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)?$",
+          "description": "rclone --stats. \"0\" disables the periodic stats block; launchd never rotates a log, and the watchdog heartbeat already carries liveness."
+        },
+        "nfsMountOptions": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(=[A-Za-z0-9._-]+)?$" },
+          "uniqueItems": true,
+          "description": "NFS *client* mount options, passed one per `rclone nfsmount --option`. nfsmount only: on Darwin rclone shells out to mount(8), which execs /sbin/mount_nfs, so these reach the kernel; on `rclone mount` the same flag means libfuse options instead. rclone hardcodes only port/mountport/tcp. `soft`+`intr` remove the `hard,nointr` bistability that makes a transient stall permanent and unprobeable; macOS `timeo` is in TENTHS of a second, so timeo=100 is 10s; `dumbtimer` stops the dynamic round-trip estimator deriving a microsecond timeout from a loopback RTT, which is what makes the default so brittle here. Verify a change landed with `nfsstat -m`, never by assuming."
+        },
+        "remoteControl": {
+          "type": "boolean",
+          "description": "Serve rclone's rc API on a unix socket inside stateDir (never a TCP port). Lets the watchdog capture core/stats and vfs/stats without touching the wedged mountpoint."
+        },
+        "watchdogEnable": {
+          "type": "boolean",
+          "description": "Run a health-probe sidecar per mount. Without it a mount that stops serving while every process stays alive is never restarted."
+        },
+        "watchdogIntervalSec": {
+          "type": "integer",
+          "minimum": 5,
+          "description": "Seconds between probes. Must be comfortably longer than the observed flap period of the NFS status flag, or a transient stall reads as a wedge."
+        },
+        "watchdogProbeTimeoutSec": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long a bounded filesystem probe may take before it counts as a failure."
+        },
+        "watchdogFailureThreshold": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Consecutive failed probes before the watchdog acts. Never 1: the not-responding flag is observed to flap on a ~15s timescale and clear on its own."
+        },
+        "watchdogRestartFloorSec": {
+          "type": "integer",
+          "minimum": 60,
+          "description": "Minimum seconds between watchdog restarts of one mount. Held wedges are still recorded, so a floor hides nothing."
+        }
       }
     },
     "orgs": {
