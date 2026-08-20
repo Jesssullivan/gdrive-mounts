@@ -31,6 +31,7 @@
         "pollInterval",
         "logLevel",
         "statsInterval",
+        "nfsMountOptions",
         "remoteControl",
         "watchdogEnable",
         "watchdogIntervalSec",
@@ -102,6 +103,12 @@
           "type": "string",
           "pattern": "^[0-9]+(ns|us|ms|s|m|h)?$",
           "description": "rclone --stats. \"0\" disables the periodic stats block; launchd never rotates a log, and the watchdog heartbeat already carries liveness."
+        },
+        "nfsMountOptions": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(=[A-Za-z0-9._-]+)?$" },
+          "uniqueItems": true,
+          "description": "NFS *client* mount options, passed one per `rclone nfsmount --option`. nfsmount only: on Darwin rclone shells out to mount(8), which execs /sbin/mount_nfs, so these reach the kernel; on `rclone mount` the same flag means libfuse options instead. rclone hardcodes only port/mountport/tcp. `soft`+`intr` remove the `hard,nointr` bistability that makes a transient stall permanent and unprobeable; macOS `timeo` is in TENTHS of a second, so timeo=100 is 10s; `dumbtimer` stops the dynamic round-trip estimator deriving a microsecond timeout from a loopback RTT, which is what makes the default so brittle here. Verify a change landed with `nfsstat -m`, never by assuming."
         },
         "remoteControl": {
           "type": "boolean",

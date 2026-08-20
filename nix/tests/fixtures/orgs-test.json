@@ -20,6 +20,7 @@
     "pollInterval": "5m",
     "logLevel": "INFO",
     "statsInterval": "0",
+    "nfsMountOptions": ["soft", "intr", "timeo=100", "retrans=5", "dumbtimer"],
     "remoteControl": true,
     "watchdogEnable": true,
     "watchdogIntervalSec": 60,

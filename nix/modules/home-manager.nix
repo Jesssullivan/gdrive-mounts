@@ -59,6 +59,7 @@ let
       pollInterval
       logLevel
       statsInterval
+      nfsMountOptions
       ;
     indexStateDir = cfg.index.stateDir;
     indexFreshnessSloHours = cfg.index.freshnessSloHours;
@@ -437,6 +438,7 @@ let
       pollInterval
       logLevel
       statsInterval
+      nfsMountOptions
       remoteControl
       watchdogEnable
       watchdogIntervalSec
@@ -491,6 +493,26 @@ let
       l: "$DRY_RUN_CMD ln -sfn ${escapeShellArg l.target} ${escapeShellArg l.path}\n"
     ) emission.links}
   '';
+
+  # A soft mount lets a stalled RPC fail with EIO instead of blocking forever.
+  # On a read-only mount that is exactly what we want — the failure is
+  # recoverable and, crucially, visible to the watchdog. On a read-write mount
+  # the same EIO can surface mid-write, so `soft` there is a data-durability
+  # decision an operator has to make deliberately, not inherit from a default
+  # written for read-only Drive browsing. Fail closed rather than gate silently:
+  # a silent per-org downgrade would be the more dangerous behaviour, because
+  # nothing would tell anyone that promoting an org had changed write semantics.
+  writableUnits = lib.filter (u: !u.readOnly) emission.units;
+
+  softMountViolations =
+    lib.optional
+      (
+        backend == "nfsmount"
+        && lib.elem "soft" settings.nfsMountOptions
+        && writableUnits != [ ]
+        && !cfg.allowSoftReadWrite
+      )
+      (lib.concatStringsSep ", " (map (u: "${u.org.name}-${u.mount.name}") writableUnits));
 
   storeViolations = lib.concatMap (
     name:
@@ -718,6 +740,52 @@ in
       '';
     };
 
+    nfsMountOptions = mkOption {
+      type = types.listOf types.str;
+      default = fromRegistry.nfsMountOptions;
+      defaultText = literalMD "`orgs.json` `defaults.nfsMountOptions`";
+      example = literalExpression ''[ "intr" "timeo=100" "retrans=5" "dumbtimer" ]'';
+      description = ''
+        NFS client mount options, emitted one per `--option`. Emitted only when
+        the backend is `nfsmount`; on `rclone mount` the same flag means libfuse
+        options, which these are not.
+
+        These are not interpreted by rclone. On Darwin `rclone nfsmount` runs
+        `mount -o port=N -o mountport=N -o tcp <our options> localhost:/ <point>`,
+        and `mount(8)` execs `/sbin/mount_nfs` for a `host:/path` special — so
+        they land in the kernel NFS client. rclone hardcodes only
+        `port`/`mountport`/`tcp`; everything else, including `hard` and
+        `nointr`, is a macOS default it never chose.
+
+        The default trades rclone's stubbornness for a mount that can recover:
+        `soft`+`intr` make a stalled call fail with `EIO` and make its caller
+        killable, instead of blocking forever in the kernel where no signal is
+        delivered — the state that made the 2026-08-19 wedge bistable and left
+        the watchdog unable even to probe it. `timeo` is in **tenths of a
+        second** on macOS, so `timeo=100` is 10s, and `dumbtimer` keeps the
+        dynamic retransmit estimator from deriving a microsecond timeout from
+        the loopback round-trip.
+
+        `soft` can surface a stalled write as an I/O error, so it is refused on
+        a read-write org (see the assertion). Confirm any change actually landed
+        with `nfsstat -m`; never assume it did.
+      '';
+    };
+
+    allowSoftReadWrite = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Permit `soft` in `nfsMountOptions` while a read-write mount exists.
+
+        Off by default, and the resulting assertion is the point: `soft` turns a
+        stalled RPC into `EIO`, which is the right trade for read-only Drive
+        browsing and a data-durability decision on a mount that accepts writes.
+        Promoting an org to `scope = "drive"` should not silently change what
+        happens to an in-flight write.
+      '';
+    };
+
     remoteControl.enable = mkOption {
       type = types.bool;
       default = fromRegistry.remoteControl;
@@ -863,6 +931,25 @@ in
             programs.gdrive-mounts: secret path(s) ${lib.concatStringsSep ", " storeViolations}
             point into ${builtins.storeDir}. Pass a runtime path such as
             config.sops.secrets."gdrive-mounts/<org>/client".path, never a path literal.
+          '';
+        }
+        {
+          assertion = softMountViolations == [ ];
+          message = ''
+            programs.gdrive-mounts: nfsMountOptions contains `soft`, but mount(s)
+            ${lib.concatStringsSep ", " softMountViolations} are read-write.
+
+            A soft mount fails a stalled RPC with EIO instead of blocking, which is
+            what we want for read-only Drive browsing — but that EIO can also land
+            mid-write. Decide deliberately:
+
+              # keep hard semantics everywhere (safe, but a stall stays permanent)
+              programs.gdrive-mounts.nfsMountOptions =
+                [ "intr" "timeo=100" "retrans=5" "dumbtimer" ];
+
+            or, having considered the write path, accept the trade explicitly:
+
+              programs.gdrive-mounts.allowSoftReadWrite = true;
           '';
         }
       ];

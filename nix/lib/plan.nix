@@ -54,6 +54,7 @@ let
       pollInterval = defaults.pollInterval;
       logLevel = defaults.logLevel;
       statsInterval = defaults.statsInterval;
+      nfsMountOptions = defaults.nfsMountOptions;
       remoteControl = defaults.remoteControl;
       watchdogEnable = defaults.watchdogEnable;
       watchdogIntervalSec = defaults.watchdogIntervalSec;
@@ -204,6 +205,24 @@ let
       "--nfs-cache-handle-limit"
       (toString settings.nfsCacheHandleLimit)
     ]
+    # NFS *client* mount options, nfsmount only. rclone does not interpret
+    # these: on Darwin `rclone nfsmount` shells out to mount(8) as
+    #   mount -o port=N -o mountport=N -o tcp <each --option> localhost:/ <point>
+    # and mount(8), given a host:/path special and no -t, execs /sbin/mount_nfs.
+    # So an `--option soft` really does reach the kernel NFS client. rclone
+    # hardcodes only port/mountport/tcp and passes ours after its own.
+    #
+    # This is the H3 mitigation, and it addresses the bistability the latency
+    # budget above can only make less likely: `hard,nointr` is a macOS *default*,
+    # not something rclone chose, and it is what turns a transient stall into a
+    # mount that cannot heal, cannot be interrupted, and cannot even be probed.
+    #
+    # On `rclone mount` (FUSE, Linux) the same flag means libfuse options, which
+    # these are not — hence the backend gate, not a platform gate.
+    ++ concatMap (o: [
+      "--option"
+      o
+    ]) (if backend == "nfsmount" then settings.nfsMountOptions else [ ])
     ++ optionals (platform == "darwin") [
       "--volname"
       "gdrive-${org.name}-${mount.name}"
@@ -461,9 +480,17 @@ let
         mkdir -p "$probe_dir"
         rm -f "$probe_dir"/probe.* 2>/dev/null || true
         sentinel="$probe_dir/probe.$$.$(gdm_epoch)"
+        # `|| rc=$?` rather than a bare call followed by `$?`: the wrapper runs
+        # under `set -e`, and a bare failing `stat` would take the subshell down
+        # before it could write the sentinel — turning every fast failure into a
+        # full `probe_timeout` wait misreported as `timeout`. It happens to work
+        # today only because every caller reaches this through `|| true`, which
+        # suspends errexit for the whole call tree. That is far too subtle a
+        # thing for the verdict to depend on, so the subshell no longer does.
         (
-          stat -- "$point/." >/dev/null 2>&1
-          printf '%s' "$?" > "$sentinel"
+          rc=0
+          stat -- "$point/." >/dev/null 2>&1 || rc=$?
+          printf '%s' "$rc" > "$sentinel"
         ) &
         probe_pid=$!
         while [ ! -s "$sentinel" ]; do
@@ -520,7 +547,16 @@ let
           if [ -n "''${sock:-}" ] && [ -S "$sock" ]; then
             for c in core/version core/pid core/stats core/memstats vfs/stats; do
               printf -- '--- rc %s ---\n' "$c"
-              "$rclone_bin" rc --unix-socket "$sock" "$c" 2>&1 || true
+              # Bounded, and here `timeout` is exactly the right tool — the
+              # inverse of the stat probe above. That probe cannot be bounded by
+              # a signal because a `hard,nointr` caller blocks in the kernel
+              # where no signal is delivered; an rc call blocks on a unix-socket
+              # read, which is interruptible, so SIGTERM lands. Unbounded, these
+              # five calls would let the process under investigation stall its
+              # own investigator: `rclone rc` inherits rclone's 5m IO timeout,
+              # so a genuinely deadlocked rclone could hold the watchdog for
+              # twenty-five minutes — the one thing a watchdog may not do.
+              timeout -k 5 "$probe_timeout" "$rclone_bin" rc --unix-socket "$sock" "$c" 2>&1 || true
             done
           else
             printf -- '--- rc unavailable (socket: %s) ---\n' "''${sock:-disabled}"
@@ -596,6 +632,16 @@ let
         gdm_log "wedge: restarting the mount unit"
         ${restartCommand}
         consecutive=0
+        # The replacement instance starts cold — it has to clear the sweep and
+        # sit through the cache guard's own budget before anything is mounted —
+        # so it is owed exactly the grace a cold start is owed. Without this
+        # reset the very next cycle reads "was mounted and is not any more" and
+        # skips the grace entirely, which turns two legitimate cases into a loop:
+        # a mount that is merely slow to come up, and a unit correctly failing
+        # loud on an absent cache volume (exit 78). Both then collect a
+        # held-by-floor line every interval, into a record this repo never
+        # rotates, and a pointless SIGQUIT+kickstart every floor period.
+        seen_mounted=0
       }
 
       gdm_note_failure() {

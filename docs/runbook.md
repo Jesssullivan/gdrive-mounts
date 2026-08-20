@@ -140,6 +140,114 @@ programs.gdrive-mounts.watchdog.enable = false;   # per host, in the lab wrapper
 
 The mounts are untouched by this; only the sidecar units disappear.
 
+## The latency budget
+
+The watchdog is the cure. This is the prevention, and it is the reason wedge
+class 1 should become rare rather than merely survivable.
+
+rclone and the macOS NFS client disagree about how long a slow backend is
+allowed to take, by three orders of magnitude:
+
+| Layer | Stock tolerance for one slow operation |
+|---|---|
+| macOS NFS client (`vfs.generic.nfs.client.initialdowndelay`) | **5 seconds**, then the mount is marked `not responding` |
+| rclone `--timeout` (IO idle) | 5 minutes |
+| × rclone `--low-level-retries` | up to **50 minutes** |
+
+Any Drive call slower than five seconds kills a mount that rclone still
+considers perfectly healthy, and `hard,nointr` then makes that state
+bistable — it cannot heal itself. On 2026-08-19 a 270-second Drive request
+ending in `ECONNRESET` did exactly this; the NFS client had given up on it 265
+seconds earlier.
+
+So the defaults pull rclone's stall window back under the client's patience:
+
+| `orgs.json` `defaults` | Value | rclone flag | Why |
+|---|---|---|---|
+| `ioTimeout` | `20s` | `--timeout` | rclone's own default is `5m` |
+| `connectTimeout` | `10s` | `--contimeout` | rclone's own default is `1m` |
+| `lowLevelRetries` | `3` | `--low-level-retries` | multiplies the above; default is `10`, so worst case falls from 50m to 60s |
+| `attrTimeout` | `5s` | `--attr-timeout` | how long the kernel may trust cached attributes |
+| `pollInterval` | `5m` | `--poll-interval` | the change-notify poll is itself backend traffic that can stall; it was mid-flight in the 19:49 dump |
+| `dirCacheTime` | `720h` | `--dir-cache-time` | **kept.** Not implicated, and it is what makes the mount usable cold |
+
+These are defaults, not constants. Every one is a module option, so a host may
+override it in the `lab` wrapper without touching this repo:
+
+```nix
+programs.gdrive-mounts.ioTimeout = "30s";   # per host, in the lab wrapper
+```
+
+Overrides are per *host*, not per *org*: `orgs.json` owns one `defaults` block
+for the whole registry, and the schema rejects unknown per-org keys. With one
+enabled org that distinction costs nothing today; if a second org ever needs a
+different budget, that is a schema change, not a config change.
+
+`just doctor` reports the values actually in force from
+`<stateDir>/effective-settings.json`, which activation writes — **not** from
+`orgs.json`, because a host override never reaches `orgs.json`.
+
+Three coupling rules hold this together, and they are asserted by
+`nix/tests/hm-eval.nix` rather than left to review:
+`ioTimeout × lowLevelRetries` stays bounded well under two minutes;
+`connectTimeout` and `attrTimeout` never exceed `ioTimeout`; and `pollInterval`
+sits far below `dirCacheTime` but never below `ioTimeout`.
+
+### What is not tuned, and why
+
+- **`nfsCacheHandleLimit`, `vfsReadAhead`, `cacheMaxSize`.** The goroutine dumps
+  refute all three as causes. Changing them as part of a mitigation pass would
+  be changing untested things; a test asserts they are left alone.
+
+## Mount semantics
+
+The latency budget makes a stall less likely. This is what stops a stall that
+happens anyway from being *permanent*.
+
+`hard,nointr` is a macOS default, not a choice rclone made. Under it a caller
+that hits a stalled mount blocks in the kernel forever and cannot be signalled
+out — which is why the 2026-08-19 wedge did not self-heal, why `umount -f`
+could return `EBUSY`, and why the watchdog cannot bound its own probe with
+`timeout`. rclone hardcodes only `port`, `mountport` and `tcp`; everything else
+is whatever `mount_nfs` defaults to.
+
+It is reachable, though. `rclone nfsmount` does not implement the mount itself:
+on Darwin it shells out to
+
+```
+mount -o port=N -o mountport=N -o tcp <our options> localhost:/ <mountpoint>
+```
+
+and `mount(8)`, given a `host:/path` special and no `-t`, execs
+`/sbin/mount_nfs`. So anything passed as `--option` lands in the kernel NFS
+client. `defaults.nfsMountOptions` is that list:
+
+| Option | Effect |
+|---|---|
+| `soft` | a stalled call fails with `EIO` after `retrans` intervals instead of blocking forever — recoverable, and *visible* to the watchdog |
+| `intr` | its caller can be interrupted, so a wedged `ls` can be killed |
+| `timeo=100` | **tenths of a second** on macOS, so 10s — the stock default is 1s |
+| `retrans=5` | retransmits before a soft mount gives up |
+| `dumbtimer` | use `timeo` literally. Without it the client derives its timeout from the observed round trip, and on a *loopback* server that estimate is microseconds — which is the real reason the stock mount gives up so fast on a Drive-backed call |
+
+`soft` is refused on a read-write mount unless
+`programs.gdrive-mounts.allowSoftReadWrite = true`: an `EIO` that lands
+mid-write is a durability decision, and promoting an org to `scope = "drive"`
+must not change write semantics silently.
+
+**These are not yet confirmed against a live mount.** `rclone nfsmount` accepts
+`--option` and the forwarding path is read from rclone 1.75.0's source, but
+whether macOS `mount(8)` honours every one of them in this position is an
+empirical question. Confirm on the first deploy, and record it:
+
+```console
+nfsstat -m | sed -n '/GDrive/,/^$/p'     # expect soft,intr,timeo=100,retrans=5,dumbtimer
+```
+
+`docs/evidence/TEMPLATE-mount-bakeoff.md` is the form. If an option does not
+appear, it was rejected or overridden — remove it rather than leaving a flag
+that does nothing.
+
 ## Exit codes
 
 | Code | Who | Meaning |
