@@ -402,6 +402,44 @@ while IFS=$'\t' read -r name mname point; do
   else
     row mounts "$name.$mname.agent" WARN "$detail ($label)"
   fi
+
+  # The health watchdog, and what it has recorded. A mount can stop serving
+  # while every process involved stays alive, so "the agent has a pid" is not
+  # the same question as "the mount answers".
+  if detail="$(agent_state "$label.watchdog" "gdrive-mounts-$name-$mname-watchdog.service")"; then
+    row watchdog "$name.$mname" OK "$detail"
+  else
+    row watchdog "$name.$mname" WARN "$detail ($label.watchdog)"
+  fi
+
+  # The kernel's own view, on the platform that has one. It reads the mount
+  # table, so unlike a stat it still answers while the mount does not.
+  if [ "$OS" = darwin ] && command -v nfsstat >/dev/null 2>&1; then
+    flags="$(nfsstat -m 2>/dev/null | awk -v p="$point" '
+      $1 == p { seen = 1 }
+      seen && /Status flags:/ {
+        sub(/^[[:space:]]*Status flags:[[:space:]]*/, "")
+        print
+        exit
+      }')"
+    case "${flags:-}" in
+      "") : ;;
+      0x0) row watchdog "$name.$mname.nfs" OK "status flags: $flags" ;;
+      *) row watchdog "$name.$mname.nfs" FAIL "status flags: $flags (the client has stopped getting answers)" ;;
+    esac
+  fi
+
+  wedge="$STATE/wedge.$name-$mname.jsonl"
+  if [ -f "$wedge" ]; then
+    n_restart="$(grep -c '"action":"restarted"' "$wedge" 2>/dev/null || true)"
+    last="$(tail -1 "$wedge" 2>/dev/null || true)"
+    last_ts="$(printf '%s' "$last" | sed -n 's/.*"ts":"\([^"]*\)".*/\1/p')"
+    last_act="$(printf '%s' "$last" | sed -n 's/.*"action":"\([^"]*\)".*/\1/p')"
+    row watchdog "$name.$mname.wedges" WARN \
+      "${n_restart:-0} recorded restart(s); last ${last_act:-unknown} at ${last_ts:-unknown} ($wedge)"
+  else
+    row watchdog "$name.$mname.wedges" OK "no wedge record: $wedge"
+  fi
 done < <(unit_inventory)
 
 while IFS=$'\t' read -r name lname link want; do

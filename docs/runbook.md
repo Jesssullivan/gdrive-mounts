@@ -12,6 +12,9 @@ place, see `docs/adoption.md`. For why the substrate looks like this, see
 - Linux (sting): one systemd --user service per org,
   `gdrive-mounts-<org>-root`, backend `rclone mount` (FUSE3). sting is
   client-only — see `docs/position.md`.
+- One health watchdog per mount, alongside it:
+  `dev.tinyland.gdrive-mounts.<org>-root.watchdog` /
+  `gdrive-mounts-<org>-root-watchdog.service`. See "The wedge" below.
 - One index timer per platform: `gdrive-mounts-index`.
 
 ## Mount layout
@@ -54,12 +57,96 @@ names the phase.
 Phases, in order: `start`, `guard`, `sweep`, `render`, `exec`. The argv on the
 `exec` line is the whole rclone command — paths and flags only, never a secret.
 
+## The wedge, and the watchdog that clears it
+
+A mount can stop serving while every process involved stays alive. Both
+observed forms were captured on neo on 2026-08-19 —
+`docs/evidence/2026-08-19-nfs-wedge.md` has the dumps:
+
+- **It stops answering.** rclone holds its NFS listener and a healthy Drive
+  connection; the macOS client has already marked the mount `not responding`;
+  `hard,nointr` means every read blocks forever and cannot be interrupted.
+- **It quietly detaches.** The go-nfs server goroutines are gone, the listening
+  socket is a leaked fd, nothing is mounted at all — and
+  `mountlib.(*MountPoint).Wait` is still blocked, so rclone never exits.
+
+In both, **nothing fails**, so `KeepAlive` never fires and not one line is
+logged. A supervisor watching the process cannot see either one. Only something
+that asks the mount table can, which is what the watchdog does.
+
+Each cycle (60s by default) it:
+
+1. Stands down if the mount unit is not loaded — an operator who stopped a
+   mount does not get it resurrected — or if nothing is mounted yet and the
+   unit is younger than the grace window (the cache guard's own budget plus
+   three minutes; the guard alone may legitimately wait two minutes). The grace
+   applies only until the watchdog has seen the point mounted once; after that
+   a disappearance is unambiguous and is acted on immediately.
+2. Probes two ways: the kernel's `nfsstat -m` status flags, which answer even
+   while the mount does not, and a bounded `stat` run from an expendable child.
+   The child is *abandoned* rather than waited on — a `hard,nointr` caller
+   blocks in the kernel where no signal lands, so `timeout` cannot rescue it.
+3. Counts consecutive failures. It acts on the **second**, never the first: the
+   `not responding` flag is observed to set and clear on its own within a
+   minute, and a single-sample watchdog would restart the mount continuously.
+4. On confirmation: captures first — `nfsstat -m` plus `core/stats`,
+   `core/pid`, `vfs/stats` over the rc unix socket, then `SIGQUIT`, which makes
+   the Go runtime dump every goroutine to the unit's `.err.log`. SIGQUIT is a
+   capture *and* a kill, so it only ever runs on the path that restarts anyway.
+5. Restarts the mount unit, and writes a wedge record.
+6. Will not restart the same mount again inside `watchdogRestartFloorSec`
+   (300s). A held wedge is still recorded — the floor suppresses the restart,
+   never the evidence.
+
+### Reading a wedge record
+
+`<stateDir>/wedge.<org>-<mount>.jsonl`, 0600, append-only, one object per line:
+
+```console
+$ jq -c . ~/.local/state/gdrive-mounts/wedge.sulliwood-root.jsonl | tail -3
+```
+
+```json
+{"ts":"2026-08-20T00:35:44Z","unit":"gdrive-mounts-sulliwood-root-watchdog","point":"/Users/jess/GDrive/sulliwood","action":"restarted","restart_count":3,"consecutive_failures":2,"pid":"94104","uptime_sec":"2781","nfs_status_flags":"0x2,not responding","probe":"timeout"}
+```
+
+| Field | Read it as |
+|---|---|
+| `action` | `restarted`, or `held-by-floor` when the restart floor suppressed it |
+| `restart_count` | cumulative restarts for this mount, derived from the file itself |
+| `uptime_sec` | how long the mount survived this time — the recurrence metric |
+| `nfs_status_flags` | `0x2,not responding` = the kernel gave up; `none` on Linux |
+| `probe` | `timeout` (a call never returned), `error`, or `unmounted` (nothing was mounted at all — the quiet class) |
+
+A rising `restart_count` with a *falling* `uptime_sec` means the mount is
+degrading, not merely flapping. Escalate on that, not on a single record.
+
+The watchdog's own log is `~/Library/Logs/tinyland/gdrive-mounts.<org>-<mount>.watchdog.log`
+(`journalctl --user -u gdrive-mounts-<org>-<mount>-watchdog` on Linux). It logs
+a heartbeat hourly, every unhealthy cycle, and every decision. Captures land in
+`<stateDir>/wedge-capture.<org>-<mount>.log`, and the goroutine dump in the
+mount unit's own `.err.log`.
+
+**Neither file is ever rotated or truncated by this repo, deliberately** —
+launchd appends, and the pre-restart evidence is the whole point. Rotate them
+by hand when they get large; never let a cleanup delete a capture you have not
+read.
+
+### Turning it off
+
+```nix
+programs.gdrive-mounts.watchdog.enable = false;   # per host, in the lab wrapper
+```
+
+The mounts are untouched by this; only the sidecar units disappear.
+
 ## Exit codes
 
 | Code | Who | Meaning |
 |---|---|---|
 | `78` | mount wrapper | Cache guard gave up. The cache volume was not a mountpoint, or the cache directory could not be created there, for the whole `cache.waitSeconds` window (120s by default). The wrapper never falls back to the boot disk. The reason, with the offending path and its mode, is on the `FATAL` line in the `.err.log` and in `<stateDir>/last-error.<org>-root`. |
-| rclone's own | mount wrapper | Anything else is rclone's exit status, forwarded because the wrapper `exec`s it. `0` after a clean `launchctl bootout` is normal. |
+| `75` | mount wrapper | The stale-mount sweep failed: something is still mounted at the point after `umount -f`. The wrapper refuses to mount on top of it — that would leave a live process, a listening port and a client addressed to the dead one, silently. The supervisor retries after its throttle interval. If it persists, unmount by hand (`umount -f <point>`) and look for a process blocked on the old mount. |
+| rclone's own | mount wrapper | Anything else is rclone's exit status, forwarded because the wrapper `exec`s it. `0` after a clean `launchctl bootout` is normal. `2` is normal after a watchdog `SIGQUIT` — that is the Go runtime dumping goroutines and exiting. |
 | `0` / `1` / `2` | `just doctor` | All OK / at least one WARN / at least one FAIL. |
 | `2` | any CLI | Usage error. |
 | `70` | any CLI | `scripts/lib/common.sh` was not found next to the script — a broken install, not a runtime fault. |
@@ -134,6 +221,9 @@ writing). Raw per-org JSON at `<indexStateDir>/<org>.json`.
 | agent restart-loops, exits `78`, breadcrumb says `cache volume … does not exist` or `… is not a mountpoint` | cache SSD absent or not mounted at mount time | mount the SSD; the agent waits ~120s then fails loud once — it never spills onto the boot disk |
 | agent restart-loops, exits `78`, breadcrumb says `… is not writable by <user>` and names a mode | the cache subtree is genuinely not writable — a re-formatted or re-plugged volume, or a directory created by another user | the breadcrumb names the exact path and its mode/owner; fix that one directory's ownership, then kickstart the agent. The guard tests the cache subtree, not the volume root, so a root-owned `/Volumes/<name>` is not by itself a fault |
 | reads under the mountpoint hang (`stat` still answers from cache) | dead NFS loopback: rclone was killed without unmounting | `umount -f` the mountpoint, then kickstart the agent; the wrapper does this sweep itself on every start (bakeoff evidence 2026-08-18) |
+| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | the watchdog restarts it within two probe cycles; if it is off, kickstart the agent. A single flap that clears itself is normal and is not a fault — see `docs/evidence/2026-08-19-nfs-wedge.md` |
+| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount detached — wedge class 2. rclone's NFS server goroutines are gone but `mountlib` is still waiting to be unmounted, so it never exits and no supervisor notices | the watchdog restarts it once the unit is past the grace window; the mount is back within ~10s. If it is off, kickstart the agent |
+| the watchdog restarts a mount repeatedly | recurrence, not a watchdog fault | read the wedge record: a rising `restart_count` with a falling `uptime_sec` is a degrading mount. Check the captures and the network before raising the restart floor |
 | plain `umount` says `Resource busy` right after activity | NFS handles still cached | stop the agent instead (`launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.<org>-root` sends SIGTERM; rclone unmounts cleanly), or `umount -f` |
 | slow first `ls` of a big directory | cold VFS dir cache | expected once; the dir-cache TTL keeps it warm after — use the index for search, not `ls`, on a cold mount |
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |
