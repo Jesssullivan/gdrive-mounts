@@ -82,6 +82,13 @@ let
 
   # Launchd hands an agent /usr/bin:/bin:/usr/sbin:/sbin and systemd hands it
   # even less, so every generated wrapper carries its own PATH.
+  #
+  # It is a *wrapper* PATH, not a general-purpose one: it deliberately omits
+  # the toolchain Home Manager's own activation script relies on (gettext for
+  # `_iNote`, nix for the final `nix-store --realise`). A wrapper is its own
+  # process and never needs those. An activation snippet is NOT its own
+  # process — see `renderActivation` and `settingsActivation` below, which
+  # therefore scope it in a subshell.
   runtimePath =
     lib.makeBinPath (
       [
@@ -402,16 +409,49 @@ let
       --state-dir ${escapeShellArg settings.indexStateDir}
   '';
 
+  # The subshell is the whole point, not decoration. Home Manager concatenates
+  # every activation snippet into ONE `activate` process, so a bare top-level
+  # `export PATH=` here does not scope to this step — it replaces the PATH for
+  # every step that follows *and* for HM's own epilogue, and nothing restores
+  # it (the only save/restore pair in `activate` captures `_saved_path` after
+  # this point). With `runtimePath` in place of HM's activation PATH, every
+  # later `_iNote` loses `gettext` and prints `gettext: command not found`,
+  # and the last statement of `activate` —
+  # `run --silence nix-store --realise "$newGenPath" --add-root ...` — loses
+  # `nix`, exits 127, and has its only diagnostic discarded by `--silence`.
+  # `set -eu` then aborts the whole activation at the final line, after every
+  # visible step succeeded. That is what wedged neo twice on 2026-08-21.
+  #
+  # Scoping rather than dropping: render-config.sh is a packaged script with
+  # real runtime needs (jq, sed, coreutils, date) and it reads the two
+  # per-org secret *path* variables below, so the body keeps exactly the
+  # environment it had. Only its blast radius changes. The secret-path exports
+  # stop leaking into the rest of the activation for the same reason.
+  #
+  # Re-indented on purpose: nix indents only the first line of an interpolated
+  # multi-line block, and exports sitting at column 0 *inside* the subshell
+  # would read, in the emitted `activate`, exactly like the defect the subshell
+  # exists to prevent. The generated script has to say what it means.
+  #
+  # The separator carries the POST-strip indentation (two spaces, one level
+  # inside the subshell), not the source indentation: nix strips an indented
+  # string's literal common indentation but never touches interpolated content.
+  secretExportBlock = lib.concatStringsSep "\n  " (
+    lib.splitString "\n" (lib.removeSuffix "\n" (lib.concatMapStrings secretExports emission.wired))
+  );
+
   renderActivation = ''
-    export PATH=${escapeShellArg runtimePath}
-    ${lib.concatMapStrings secretExports emission.wired}
-    $DRY_RUN_CMD mkdir -p ${escapeShellArg settings.stateDir}
-    $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
-    $DRY_RUN_CMD ${renderBin} \
-      --orgs ${escapeShellArg orgsFileArg} \
-      --template ${escapeShellArg templateArg} \
-      --out-dir ${escapeShellArg settings.stateDir} \
-      --best-effort
+    (
+      export PATH=${escapeShellArg runtimePath}
+      ${secretExportBlock}
+      $DRY_RUN_CMD mkdir -p ${escapeShellArg settings.stateDir}
+      $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
+      $DRY_RUN_CMD ${renderBin} \
+        --orgs ${escapeShellArg orgsFileArg} \
+        --template ${escapeShellArg templateArg} \
+        --out-dir ${escapeShellArg settings.stateDir} \
+        --best-effort
+    )
   '';
 
   # What this module actually resolved, written where doctor can read it. A
@@ -477,12 +517,17 @@ let
 
   # Atomic 0600 install, same contract as every other file this repo creates:
   # write beside the destination, then rename over it.
+  #
+  # Same subshell, same reason as `renderActivation`: one shared `activate`
+  # process, so the PATH this step wants must not outlive this step.
   settingsActivation = ''
-    export PATH=${escapeShellArg runtimePath}
-    $DRY_RUN_CMD mkdir -p ${escapeShellArg settings.stateDir}
-    $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
-    $DRY_RUN_CMD install -m 600 ${effectiveSettingsFile} ${escapeShellArg "${effectiveSettingsPath}.new"}
-    $DRY_RUN_CMD mv -f ${escapeShellArg "${effectiveSettingsPath}.new"} ${escapeShellArg effectiveSettingsPath}
+    (
+      export PATH=${escapeShellArg runtimePath}
+      $DRY_RUN_CMD mkdir -p ${escapeShellArg settings.stateDir}
+      $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
+      $DRY_RUN_CMD install -m 600 ${effectiveSettingsFile} ${escapeShellArg "${effectiveSettingsPath}.new"}
+      $DRY_RUN_CMD mv -f ${escapeShellArg "${effectiveSettingsPath}.new"} ${escapeShellArg effectiveSettingsPath}
+    )
   '';
 
   # Out-of-store symlinks: the target is a live mountpoint that does not exist

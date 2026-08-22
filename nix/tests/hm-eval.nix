@@ -412,6 +412,23 @@ let
     printf '\n'
   '';
 
+  # Sources a concatenated activation script exactly the way Home Manager's
+  # `activate` runs it — one process, `$DRY_RUN_CMD` set, so only the
+  # environment statements take effect — and prints what survived. Line 1 is
+  # the resulting PATH; line 2 is one of the per-org secret-path variables,
+  # which leak by the same mechanism. Nothing here needs an external command,
+  # so the caller can hand it an entirely synthetic PATH.
+  # usage: ambient-env-probe <concatenated-activation-script>
+  ambientEnvProbe = pkgs.writeShellScript "gdrive-mounts-ambient-env-probe" ''
+    set -u
+    export DRY_RUN_CMD=echo
+    # No `set -e`: the point is what the environment looks like afterwards,
+    # not whether every echoed line returned zero.
+    . "$1" >/dev/null 2>&1
+    printf '%s\n' "$PATH"
+    printf '%s\n' "''${GDM_SULLIWOOD_TOKEN_FILE:-}"
+  '';
+
   # usage: probe dev|mountpoint|deepest <path> [floor]
   probeScript = pkgs.writeShellScript "gdrive-mounts-guard-probe" ''
     set -euo pipefail
@@ -585,6 +602,30 @@ let
       ok =
         darwinCfg.home.activation ? gdriveMountsSettings
         && hasInfix "${homeDir}/.local/state/gdrive-mounts/effective-settings.json" settingsEntry.data;
+    }
+    {
+      # neo, 2026-08-21. Home Manager concatenates every activation snippet
+      # into ONE `activate` process, so a top-level `export PATH=` in a
+      # snippet is not scoped to that snippet: it replaces the PATH for every
+      # later step and for HM's own epilogue. `runtimePath` is a *wrapper*
+      # PATH and carries neither `gettext` (every later `_iNote` printed
+      # `gettext: command not found`) nor `nix` — and the last statement of
+      # `activate`, `run --silence nix-store --realise "$newGenPath"
+      # --add-root ...`, exited 127 with its only diagnostic discarded by
+      # `--silence`. `set -eu` killed the activation at its final line, after
+      # every visible step had succeeded. Scoped occurrences are fine; a
+      # top-level one is the defect.
+      name = "activation-snippets-do-not-clobber-the-ambient-path";
+      ok =
+        let
+          topLevel = entry: lib.any (l: lib.hasPrefix "export PATH=" l) (lib.splitString "\n" entry.data);
+        in
+        !(topLevel renderEntry)
+        && !(topLevel settingsEntry)
+        && !(topLevel linkEntry)
+        # …and the render step keeps its runtime PATH, just scoped, so this is
+        # a scoping assertion and not an accidental "we deleted the PATH" pass.
+        && hasInfix "export PATH=" renderEntry.data;
     }
     {
       name = "agents-carry-an-explicit-path";
@@ -910,6 +951,19 @@ if failures != [ ] then
 else
   pkgs.runCommand "gdrive-mounts-hm-eval" { } ''
     set -eu
+
+    # Every negative assertion in this builder goes through `no`, because the
+    # obvious spelling does not work: bash exempts a pipeline whose exit status
+    # is inverted with `!` from `set -e`, so a bare `! grep -q X f` can never
+    # fail the build no matter what `f` contains. It reads like an assertion and
+    # is a no-op. `no grep -q X f` is the same intent, and it actually fails.
+    no() {
+      if "$@"; then
+        echo "assertion failed — this must NOT hold: $*" >&2
+        exit 1
+      fi
+    }
+
     dsul=${darwinScript "gdrive-mounts-sulliwood-root"}
     drw=${darwinScript "gdrive-mounts-rwlab-root"}
     lsul=${linuxScript "gdrive-mounts-sulliwood-root"}
@@ -922,11 +976,11 @@ else
     # C4 — scope is enforced by the mount, not only by the token.
     grep -q -- '--read-only' "$dsul"
     grep -q -- '--read-only' "$lsul"
-    ! grep -q -- '--read-only' "$drw"
+    no grep -q -- '--read-only' "$drw"
 
     # C1 — the nfs handle limit exists only on nfsmount.
     grep -q -- '--nfs-cache-handle-limit' "$dsul"
-    ! grep -q -- '--nfs-cache-handle-limit' "$lsul"
+    no grep -q -- '--nfs-cache-handle-limit' "$lsul"
 
     # H3 — NFS client mount options reach mount(8), and only on nfsmount. On
     # `rclone mount` the same flag means libfuse options, which these are not.
@@ -938,18 +992,18 @@ else
     for o in soft intr timeo=100 retrans=5 dumbtimer; do
       grep -qE -- "--option '?$o'?" "$dsul"
     done
-    ! grep -q -- '--option' "$lsul"
+    no grep -q -- '--option' "$lsul"
 
     # --volname is documented macOS only.
     grep -q -- '--volname' "$dsul"
-    ! grep -q -- '--volname' "$lsul"
+    no grep -q -- '--volname' "$lsul"
 
     # C5 — one config per org, and no org sees another org's secrets.
     grep -q 'rclone-sulliwood.conf' "$dsul"
-    ! grep -q 'rclone-rwlab.conf' "$dsul"
+    no grep -q 'rclone-rwlab.conf' "$dsul"
     grep -q 'GDM_SULLIWOOD_CLIENT_FILE' "$dsul"
     grep -q 'GDM_SULLIWOOD_TOKEN_FILE' "$dsul"
-    ! grep -q 'GDM_RWLAB' "$dsul"
+    no grep -q 'GDM_RWLAB' "$dsul"
 
     # C6 — bounded wait then a loud, distinguishable exit.
     grep -qF 'mount | grep -qF " on ' "$dsul"
@@ -963,7 +1017,7 @@ else
     # C6: …and it tests the cache subtree for writability, never the root-owned
     # volume root, which is what respawn-looped neo on 2026-08-19.
     grep -q 'gdm_deepest_existing "$cache" "$volume"' "$dsul"
-    ! grep -qF '! -w "$volume"' "$dsul"
+    no grep -qF '! -w "$volume"' "$dsul"
     # …and the cache root under /Volumes/ still demands a real mountpoint.
     grep -qF 'require_mountpoint=1' "$dsul"
 
@@ -1001,7 +1055,7 @@ else
     doc="$(grep -o '/nix/store/[^ ]*-gdrive-mounts-effective-settings.json' "$settings" | head -1)"
     grep -q '"cacheRoot"' "$doc"
     grep -q '"backend":"nfsmount"' "$doc"
-    ! grep -q '/run/secrets' "$doc"
+    no grep -q '/run/secrets' "$doc"
 
     # C6b — the sweep is asserted, not attempted. A swallowed `umount -f`
     # failure means the next line mounts on top of the corpse.
@@ -1024,8 +1078,8 @@ else
     # before rclone tries to bind over it.
     grep -q -- '--rc-addr unix:///' "$dsul"
     grep -q -- '--rc-no-auth' "$dsul"
-    ! grep -q -- '--rc-addr 127.0.0.1' "$dsul"
-    ! grep -q -- '--rc-addr localhost' "$dsul"
+    no grep -q -- '--rc-addr 127.0.0.1' "$dsul"
+    no grep -q -- '--rc-addr localhost' "$dsul"
     grep -qF 'rm -f "$sock"' "$dsul"
 
     # ── the watchdog wrappers ─────────────────────────────────────────────────
@@ -1033,7 +1087,7 @@ else
     # /proc/self/mounts read the kernel table instead.
     grep -qF 'mount | grep -qF " on ' "$dwatch"
     grep -qF '/proc/self/mounts' "$lwatch"
-    ! grep -q 'mountpoint -q' "$lwatch"
+    no grep -q 'mountpoint -q' "$lwatch"
 
     # It supervises the real unit, by name, with the real supervisor.
     grep -q 'launchctl kickstart -k' "$dwatch"
@@ -1063,7 +1117,7 @@ else
 
     # The kernel NFS signal is Darwin+nfsmount only.
     grep -q 'nfsstat -m' "$dwatch"
-    ! grep -q 'nfsstat' "$lwatch"
+    no grep -q 'nfsstat' "$lwatch"
 
     # The grace window before an unmounted point counts as a wedge is derived
     # from the cache guard's own budget (120s default + 180s), never a knob of
@@ -1270,7 +1324,7 @@ else
     printf 1 > "$s6c/detach-after"     # healthy cycle 1, then the mount vanishes
     "$wdfloor" "$s6c/point" "$s6c" 3 > "$s6c/out"
     grep -q 'was mounted and is not any more' "$s6c/out"
-    ! grep -q 'standing down inside the' "$s6c/out"
+    no grep -q 'standing down inside the' "$s6c/out"
     [ "$(wc -l < "$s6c/restarts" | tr -d ' ')" = 1 ]
     grep -q '"probe":"unmounted"' "$s6c/wedge.jsonl"
 
@@ -1321,6 +1375,45 @@ else
     # ...so it restarted once, not once per pair of cycles.
     [ "$(wc -l < "$s8/restarts" | tr -d ' ')" = 1 ]
     [ "$(grep -c '"action":"restarted"' "$s8/wedge.jsonl")" = 1 ]
+
+    # ── layer 3c: the concatenated activation must hand back the PATH it got ──
+    #
+    # neo, 2026-08-21, twice. Home Manager joins every activation snippet into
+    # a single `activate` process, so a top-level `export PATH=` in a snippet
+    # is ambient from that point on and nothing restores it — `activate`'s own
+    # save/restore pair captures `_saved_path` further down. With the wrapper
+    # PATH in place of HM's, `gettext` went missing (46 `gettext: command not
+    # found` lines in the transcript) and so did `nix`, so `activate`'s final
+    # statement — `run --silence nix-store --realise "$newGenPath" --add-root
+    # "$currentGenGcPath"` — exited 127 with its only diagnostic thrown away by
+    # `--silence`, and `set -eu` aborted the generation after every visible
+    # step had succeeded.
+    #
+    # Asserted twice, statically and by execution, because the static form is
+    # the one that names the defect and the executed form is the one that
+    # cannot be fooled by a shape nobody anticipated.
+    act="$PWD/activation-concatenated.sh"
+    cat "$settings" "$render" "$links" > "$act"
+    # Nix strips an indented string's common indentation, so a snippet's own
+    # top level is column 0. A scoped `( export PATH=… )` is indented and
+    # deliberately allowed.
+    no grep -qE '^export PATH=' "$act"
+    no grep -qE '^export GDM_' "$act"
+
+    probe_out="$(env -i PATH=/gdm-sentinel-path ${ambientEnvProbe} "$act")"
+    surviving_path="$(printf '%s\n' "$probe_out" | sed -n 1p)"
+    leaked_secret_path="$(printf '%s\n' "$probe_out" | sed -n 2p)"
+    if [ "$surviving_path" != /gdm-sentinel-path ]; then
+      echo "activation clobbered the ambient PATH: $surviving_path" >&2
+      exit 1
+    fi
+    if [ -n "$leaked_secret_path" ]; then
+      echo "activation leaked a secret path variable: $leaked_secret_path" >&2
+      exit 1
+    fi
+    # …and the render step still carries the runtime PATH it needs, scoped, so
+    # the assertions above cannot be satisfied by deleting the PATH outright.
+    grep -qE '^[[:space:]]+export PATH=' "$render"
 
     chmod -R u+w "$t" "$w" 2>/dev/null || true
     touch $out
