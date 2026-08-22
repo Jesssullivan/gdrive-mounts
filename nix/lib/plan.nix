@@ -142,6 +142,7 @@ let
   #   --nfs-cache-handle-limit exists only on nfsmount/serve nfs
   #   --volname is documented macOS/Windows only
   #   --read-only enforces the scope the token was minted with
+  #   --option rdonly makes that enforcement visible to the kernel (nfsmount)
   #
   # The latency block (--timeout / --contimeout / --low-level-retries /
   # --attr-timeout / --poll-interval) is not tuning for its own sake. rclone's
@@ -163,6 +164,31 @@ let
       backend = backendFor { inherit platform settings; };
       path = mount.remotePath or "";
       src = if path == "" then "${org.remote}:" else "${org.remote}:${path}";
+
+      # The NFS *client* option list for this one unit: the registry's options,
+      # plus `rdonly` when the org itself resolves read-only.
+      #
+      # `--read-only` alone stops the write in rclone's VFS — the right layer
+      # for correctness and the wrong one for the user interface. The VFS
+      # answers a refused CREATE with EACCES, the go-nfs server maps that to
+      # NFS3ERR_ACCES, and the kernel hands the caller EACCES. Nothing in that
+      # chain ever sets MNT_RDONLY, so three signals macOS relies on all lie:
+      # the mount flags say writable, `statvfs` reports no ST_RDONLY, and
+      # `access(W_OK)` says the write would succeed. Applications believe them.
+      # Photos.app exporting 13 files to a read-only mount produced 13 separate
+      # "you don't have permission" errors instead of one honest read-only-
+      # volume dialog (neo, 2026-08-21).
+      #
+      # `rdonly` is an option of mount(8) and /sbin/mount_nfs, so it reaches the
+      # kernel by the same path as `soft` and sets MNT_RDONLY on the mount. The
+      # client then refuses the write itself, with EROFS, before anything is
+      # sent — and every read-only signal above agrees with the refusal.
+      #
+      # Belt over the existing suspenders: rclone's VFS still refuses the write.
+      # This changes what the caller is *told*, not what is permitted, which is
+      # why it is safe to add at the client layer and why removing `--read-only`
+      # in exchange would not be.
+      nfsClientOptions = settings.nfsMountOptions ++ optionals (readOnly org) [ "rdonly" ];
     in
     [
       backend
@@ -210,7 +236,9 @@ let
     #   mount -o port=N -o mountport=N -o tcp <each --option> localhost:/ <point>
     # and mount(8), given a host:/path special and no -t, execs /sbin/mount_nfs.
     # So an `--option soft` really does reach the kernel NFS client. rclone
-    # hardcodes only port/mountport/tcp and passes ours after its own.
+    # hardcodes only port/mountport/tcp and passes ours after its own — each as
+    # its own `-o <value>` pair, never comma-joined into one, so an added option
+    # cannot collide with rclone's (rclone 1.75.0 cmd/nfsmount/nfsmount.go).
     #
     # This is the H3 mitigation, and it addresses the bistability the latency
     # budget above can only make less likely: `hard,nointr` is a macOS *default*,
@@ -222,7 +250,7 @@ let
     ++ concatMap (o: [
       "--option"
       o
-    ]) (if backend == "nfsmount" then settings.nfsMountOptions else [ ])
+    ]) (if backend == "nfsmount" then nfsClientOptions else [ ])
     ++ optionals (platform == "darwin") [
       "--volname"
       "gdrive-${org.name}-${mount.name}"

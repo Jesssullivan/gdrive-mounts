@@ -769,6 +769,12 @@ in
         `soft` can surface a stalled write as an I/O error, so it is refused on
         a read-write org (see the assertion). Confirm any change actually landed
         with `nfsstat -m`; never assume it did.
+
+        This list is fleet-wide. A unit whose org resolves read-only also gets
+        `rdonly` appended, which is per-org and not settable here: without it
+        rclone's `--read-only` refusal reaches the caller as `NFS3ERR_ACCES`,
+        `MNT_RDONLY` is never set, and macOS reports a per-file permission
+        error rather than a read-only volume.
       '';
     };
 
