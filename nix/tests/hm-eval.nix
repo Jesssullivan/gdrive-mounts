@@ -124,8 +124,9 @@ let
             package = stubRclone;
             toolsPackage = stubTools;
             orgsFile = orgs;
-            # The fixture deliberately carries a read-write org (rwlab) AND the
-            # default `soft` mount option, which is exactly the combination the
+            # The fixture deliberately carries write-scoped orgs (rwlab at
+            # `drive`, filelab at the narrower `drive.file`) AND the default
+            # `soft` mount option, which is exactly the combination the
             # soft-on-read-write assertion refuses. Accept it here so the rest of
             # the suite can assert `--option soft` renders; `softRwCfg` below
             # proves the assertion still fires when it is not accepted.
@@ -144,6 +145,7 @@ let
   wiredSecrets = {
     sulliwood = dummySecret "sulliwood";
     rwlab = dummySecret "rwlab";
+    filelab = dummySecret "filelab";
   };
 
   darwinCfg = evalWith {
@@ -249,8 +251,8 @@ let
     orgs = prodOrgsFile;
   };
 
-  # Same as darwinCfg, minus the acceptance. The fixture's rwlab org is
-  # read-write, so the soft-mount guard must refuse this one.
+  # Same as darwinCfg, minus the acceptance. The fixture's rwlab and filelab
+  # orgs are write-scoped, so the soft-mount guard must refuse this one.
   softRwCfg =
     (lib.evalModules {
       specialArgs = { inherit pkgs lib; };
@@ -466,6 +468,8 @@ let
       name = "darwin-emits-one-agent-and-one-watchdog-per-mount-plus-index";
       ok =
         agentNames darwinCfg == [
+          "gdrive-mounts-filelab-root"
+          "gdrive-mounts-filelab-root-watchdog"
           "gdrive-mounts-index"
           "gdrive-mounts-rwlab-root"
           "gdrive-mounts-rwlab-root-watchdog"
@@ -477,6 +481,7 @@ let
       name = "watchdog-can-be-turned-off-without-touching-the-mounts";
       ok =
         agentNames noWatchdogCfg == [
+          "gdrive-mounts-filelab-root"
           "gdrive-mounts-index"
           "gdrive-mounts-rwlab-root"
           "gdrive-mounts-sulliwood-root"
@@ -512,6 +517,8 @@ let
       name = "linux-emits-one-service-and-one-watchdog-per-mount-plus-index";
       ok =
         serviceNames linuxCfg == [
+          "gdrive-mounts-filelab-root"
+          "gdrive-mounts-filelab-root-watchdog"
           "gdrive-mounts-index"
           "gdrive-mounts-rwlab-root"
           "gdrive-mounts-rwlab-root-watchdog"
@@ -544,7 +551,8 @@ let
       ok =
         builtins.length unwiredCfg.warnings == 1
         && hasInfix "sulliwood" (head unwiredCfg.warnings)
-        && hasInfix "rwlab" (head unwiredCfg.warnings);
+        && hasInfix "rwlab" (head unwiredCfg.warnings)
+        && hasInfix "filelab" (head unwiredCfg.warnings);
     }
     {
       name = "wired-orgs-do-not-warn";
@@ -566,6 +574,30 @@ let
     {
       name = "c4-no-read-only-for-drive-scope";
       ok = !(elem "--read-only" (argsOf "darwin" "rwlab"));
+    }
+    {
+      # `drive.file` is a WRITE scope. It grants create, read, update and delete
+      # — it only narrows *which* files, to the ones this client created or the
+      # user explicitly opened with it. Forcing `--read-only` onto it made the
+      # smallest write scope Google offers unusable as a mount, which is exactly
+      # the scope a minimal-blast-radius outbox lane wants (TIN-3999).
+      name = "c4-no-read-only-for-drive-file-scope";
+      ok =
+        !(elem "--read-only" (argsOf "darwin" "filelab"))
+        && !(elem "--read-only" (argsOf "linux" "filelab"));
+    }
+    {
+      # The predicate itself, at both edges. It is an allowlist of write scopes,
+      # not a `!= "drive"` test: an absent scope keeps the documented
+      # `drive.readonly` default, and a scope this repo has never heard of has
+      # to resolve read-only rather than inherit write semantics by omission.
+      name = "readonly-is-an-allowlist-of-write-scopes";
+      ok =
+        plan.readOnly { scope = "drive.readonly"; }
+        && plan.readOnly { }
+        && plan.readOnly { scope = "drive.appdata"; }
+        && !(plan.readOnly { scope = "drive"; })
+        && !(plan.readOnly { scope = "drive.file"; });
     }
     {
       name = "volname-is-darwin-only";
@@ -884,7 +916,12 @@ let
         let
           f = failing softRwCfg;
         in
-        builtins.length f == 1 && hasInfix "rwlab-root" (head f).message;
+        builtins.length f == 1
+        && hasInfix "rwlab-root" (head f).message
+        # ...and the durability guard has to see `drive.file` as writable too,
+        # or the narrow write scope would silently inherit `soft`'s mid-write
+        # EIO with no operator decision at all.
+        && hasInfix "filelab-root" (head f).message;
     }
     {
       # ...and the guard must not false-positive on the real registry, whose
@@ -1015,6 +1052,7 @@ else
 
     dsul=${darwinScript "gdrive-mounts-sulliwood-root"}
     drw=${darwinScript "gdrive-mounts-rwlab-root"}
+    dfile=${darwinScript "gdrive-mounts-filelab-root"}
     lsul=${linuxScript "gdrive-mounts-sulliwood-root"}
     dwatch=${darwinScript "gdrive-mounts-sulliwood-root-watchdog"}
     lwatch=${linuxScript "gdrive-mounts-sulliwood-root-watchdog"}
@@ -1026,6 +1064,9 @@ else
     grep -q -- '--read-only' "$dsul"
     grep -q -- '--read-only' "$lsul"
     no grep -q -- '--read-only' "$drw"
+    # ...and `drive.file` is a write scope, so the narrow-write unit must not
+    # carry it either.
+    no grep -q -- '--read-only' "$dfile"
 
     # C1 — the nfs handle limit exists only on nfsmount.
     grep -q -- '--nfs-cache-handle-limit' "$dsul"

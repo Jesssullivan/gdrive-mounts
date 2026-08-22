@@ -169,7 +169,10 @@
             "description": "Shared-drive id. Required when driveKind is `shared`; render-config.sh appends `team_drive` to the stanza from it."
           },
           "remote": { "type": "string", "pattern": "^gdrive-[a-z0-9-]+$" },
-          "scope": { "enum": ["drive.readonly", "drive", "drive.file"] },
+          "scope": {
+            "enum": ["drive.readonly", "drive", "drive.file"],
+            "description": "OAuth scope this org's token is minted with. `drive.readonly` is the only read scope and mounts `--read-only`; `drive` and `drive.file` both grant writes and do not — `drive.file` is a narrow write scope, restricted to the files this client created. See docs/sops-integration.md."
+          },
           "promotionTarget": { "enum": ["drive.readonly", "drive", "drive.file"] },
           "secretEnvPrefix": { "type": "string", "pattern": "^GDM_[A-Z0-9_]+$" },
           "mounts": {

@@ -81,6 +81,21 @@ copy it, don't retype it.
 
 ## Scope and promotion
 
+Three scopes are allowed, and only one of them is a read scope:
+
+| `scope` | Google grants | The mount |
+|---|---|---|
+| `drive.readonly` | read over the whole Drive | read-only (`--read-only`) |
+| `drive` | full read/write over the whole Drive | read-write |
+| `drive.file` | full read/write, **restricted to the files this client created** or that the user explicitly opened with it | read-write |
+
+`drive.file` is a *narrow write* scope, not a read scope: it grants create,
+read, update and delete, and only narrows which files they apply to. It is the
+smallest blast radius Google offers for a mount that has to accept the
+occasional write — an outbox that only ever sees its own output — so the mount
+must not force it read-only. An absent `scope` defaults to `drive.readonly`,
+and any value this repo does not recognise resolves read-only.
+
 Scope lives in the token, not just in `orgs.json`. `orgs.json` `scope`
 records intent; the token minted by `just mint-token` is what Google
 actually granted. **Promotion is a re-mint, not a config edit**: flipping
