@@ -39,9 +39,9 @@ An org is one entry in the `orgs[]` array of `orgs.json` (schema:
   a watchdog sidecar. Unit anatomy, logs, and probes: `docs/runbook.md`.
 
 Current registry: `sulliwood` is enabled at `scope: "drive"` (promotion
-part 1 — intent — landed 2026-08-22; parts 2–3 are pending, see the worked
-example below); `xoxd` and `lmux` are disabled at `drive.readonly` with
-`promotionTarget: "drive"`.
+parts 1–2 — intent and token — landed 2026-08-22; part 3, the attended
+switch, is pending; see the worked example below); `xoxd` and `lmux` are
+disabled at `drive.readonly` with `promotionTarget: "drive"`.
 
 Adding an org after the first is a data-and-secrets change only — one
 `orgs.json` entry, one client/token pair, one lab wrapper edit. No script or
@@ -140,9 +140,13 @@ the two rulings that rode with it:
 
 The commit message states its own limit: "This records intent only … the
 mount stays effectively read-only until `just mint-token sulliwood` re-mints
-the token at the new scope … and the lab switch delivers it." Parts 2 and 3
-are the operator-attended remainder; until they land, `just doctor` shows
-the config-vs-token scope mismatch by design. The acceptance test for the
+the token at the new scope … and the lab switch delivers it." Part 2 landed
+the same day: `just mint-token sulliwood` ran operator-attended at ~12:56Z
+(consent as the org account at the full `drive` scope, refresh fingerprint
+`cd155b7a83ee` per the mint record), and `just seed-lab sulliwood` delivered
+the re-encrypted leaves to lab (commit `ca5b9a82`, merged in lab PR #1400).
+Part 3 — the attended switch — is the remainder; until it lands, the live
+mount still runs the old plan and token. The acceptance test for the
 completed promotion — and the post-switch validation checklist that proves
 it — is [`docs/agent-symbolic-manipulation.md`](agent-symbolic-manipulation.md).
 

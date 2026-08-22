@@ -35,10 +35,12 @@ uses them literally so it is copy-pasteable on neo today:
 
 The RW mount exists only after the operator's attended
 `just nix-switch macbook-neo` in `lab` (`docs/adoption.md` step 5 — never
-agent-run). sulliwood is `scope: "drive"` in `orgs.json` (#16, intent only)
-and the token must first be re-minted at that scope — promotion is a
+agent-run). sulliwood is `scope: "drive"` in `orgs.json` (#16), and the
+token was re-minted at that scope on 2026-08-22 (refresh fingerprint
+`cd155b7a83ee`; leaves delivered to lab in PR #1400) — promotion is a
 re-mint, not a config edit (`docs/sops-integration.md`; the full three-part
-ceremony is [`docs/agent-enrolment.md`](agent-enrolment.md)). Before
+ceremony and its status live in
+[`docs/agent-enrolment.md`](agent-enrolment.md)). Before
 touching anything, prove all three of
 the following. Each probe is honest post-#12/#15; the pre-#12 failure mode
 is named inline.
