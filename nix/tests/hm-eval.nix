@@ -1089,8 +1089,8 @@ else
     # per-file permission error instead of a read-only volume. Scope-gated, so
     # the read-write unit must not carry it anywhere in its argv.
     grep -qE -- "--option '?rdonly'?" "$dsul"
-    ! grep -q -- 'rdonly' "$drw"
-    ! grep -q -- 'rdonly' "$lsul"
+    no grep -q -- 'rdonly' "$drw"
+    no grep -q -- 'rdonly' "$lsul"
 
     # --volname is documented macOS only.
     grep -q -- '--volname' "$dsul"
