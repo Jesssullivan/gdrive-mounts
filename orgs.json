@@ -35,7 +35,7 @@
       "enabled": true,
       "driveKind": "mydrive",
       "remote": "gdrive-sulliwood",
-      "scope": "drive.readonly",
+      "scope": "drive",
       "promotionTarget": "drive",
       "secretEnvPrefix": "GDM_SULLIWOOD",
       "mounts": [
