@@ -198,6 +198,19 @@ let
     in
     if idxs == [ ] || (head idxs) + 1 >= n then null else builtins.elemAt args ((head idxs) + 1);
 
+  # Every value passed as `--option`, in argv order. Each option must get its
+  # own flag: `-o a,b` is not what rclone's stringArray builds, and a bare
+  # `elem "rdonly" args` would also match a mountpoint or a volname that
+  # happened to contain the word.
+  optionValues =
+    args:
+    let
+      n = builtins.length args;
+    in
+    map (i: builtins.elemAt args (i + 1)) (
+      filter (i: builtins.elemAt args i == "--option" && i + 1 < n) (lib.range 0 (n - 1))
+    );
+
   # A Go duration as the schema constrains it -> milliseconds, so the budget can
   # be reasoned about numerically. Sub-millisecond units floor to 0; nothing in
   # this budget is or should be sub-millisecond.
@@ -797,15 +810,13 @@ let
       name = "nfs-client-mount-options-ship-on-nfsmount";
       ok =
         let
-          a = argsOf "darwin" "sulliwood";
-          n = builtins.length a;
-          # The value following each `--option`, in order. Each option must get
-          # its own flag: `-o a,b` is not what rclone's stringArray builds.
-          values = map (i: builtins.elemAt a (i + 1)) (
-            filter (i: builtins.elemAt a i == "--option") (lib.range 0 (n - 1))
-          );
+          values = optionValues (argsOf "darwin" "sulliwood");
         in
-        values == testSettings.nfsMountOptions && values != [ ];
+        # sulliwood is read-only, so: the registry list verbatim, then the
+        # scope-derived `rdonly`. Asserting the whole list in order is what
+        # proves the scope gate *appends* rather than displacing an operator's
+        # options — a set comparison would pass either way.
+        values == testSettings.nfsMountOptions ++ [ "rdonly" ] && testSettings.nfsMountOptions != [ ];
     }
     {
       # `rclone mount` (FUSE) reads --option as libfuse options, which these are
@@ -824,6 +835,44 @@ let
           o = prodData.defaults.nfsMountOptions;
         in
         elem "soft" o && elem "intr" o && elem "timeo=100" o && elem "retrans=5" o && elem "dumbtimer" o;
+    }
+    # ── the read-only mount lies to the kernel (neo, 2026-08-21) ───────────────
+    {
+      # `--read-only` refuses the write inside rclone's VFS, and the refusal
+      # reaches the caller as NFS3ERR_ACCES -> EACCES: indistinguishable from a
+      # permissions problem. MNT_RDONLY stays clear, statvfs reports no
+      # ST_RDONLY, access(W_OK) succeeds — so Photos.app exporting 13 files
+      # raised 13 per-file "you don't have permission" errors instead of one
+      # read-only-volume dialog. `rdonly` is what puts the flag on the mount, so
+      # the client refuses the write itself, with EROFS.
+      name = "read-only-org-advertises-rdonly-to-the-kernel";
+      ok = elem "rdonly" (optionValues (argsOf "darwin" "sulliwood"));
+    }
+    {
+      # ...and a writable org must not get it. `rdonly` is enforced by the
+      # kernel, so a stray one would make every write fail with EROFS while
+      # rclone, the token and the assertions all believe the mount is writable.
+      # Checked against the whole argv, not just the option values: a `rdonly`
+      # anywhere in this unit's argv is a bug.
+      name = "read-write-org-does-not-advertise-rdonly";
+      ok = !(elem "rdonly" (argsOf "darwin" "rwlab"));
+    }
+    {
+      # `--option` is libfuse options on `rclone mount`, and `rdonly` is not one
+      # of them. The gate is the backend, exactly as for the rest of the list.
+      name = "rdonly-is-nfsmount-only";
+      ok = !(elem "rdonly" (argsOf "linux" "sulliwood"));
+    }
+    {
+      # Two independent layers, and both have to ship. rclone's VFS is what
+      # makes the refusal correct; the kernel flag is what makes it legible.
+      # Dropping either one is a regression, in opposite directions.
+      name = "both-read-only-layers-ship-on-a-read-only-mount";
+      ok =
+        let
+          a = argsOf "darwin" "sulliwood";
+        in
+        elem "--read-only" a && elem "rdonly" (optionValues a);
     }
     {
       # A soft mount turns a stalled RPC into EIO. That is the right trade for
@@ -993,6 +1042,14 @@ else
       grep -qE -- "--option '?$o'?" "$dsul"
     done
     no grep -q -- '--option' "$lsul"
+
+    # The kernel-visible half of the read-only gate. Without it the VFS refusal
+    # arrives as NFS3ERR_ACCES, MNT_RDONLY is never set, and macOS reports a
+    # per-file permission error instead of a read-only volume. Scope-gated, so
+    # the read-write unit must not carry it anywhere in its argv.
+    grep -qE -- "--option '?rdonly'?" "$dsul"
+    ! grep -q -- 'rdonly' "$drw"
+    ! grep -q -- 'rdonly' "$lsul"
 
     # --volname is documented macOS only.
     grep -q -- '--volname' "$dsul"

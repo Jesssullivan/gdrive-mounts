@@ -235,13 +235,46 @@ client. `defaults.nfsMountOptions` is that list:
 mid-write is a durability decision, and promoting an org to `scope = "drive"`
 must not change write semantics silently.
 
+### `rdonly`, and why `--read-only` is not enough
+
+One more option is appended per unit, not from the registry: a unit whose org
+resolves read-only also gets `--option rdonly`.
+
+`--read-only` refuses the write inside rclone's VFS. That is the right layer
+for correctness and the wrong one for the user interface. The VFS answers a
+refused `CREATE` with `EACCES`, the go-nfs server maps it to `NFS3ERR_ACCES`,
+and the kernel hands the caller `EACCES` — a *permissions* error. Nothing in
+that chain sets `MNT_RDONLY`, so three signals macOS relies on all lie:
+
+| Signal | What it says on a `--read-only`-only mount | Truth |
+|---|---|---|
+| mount flags | `MNT_RDONLY` clear | volume accepts no writes |
+| `statvfs(2)` `f_flag` | no `ST_RDONLY` | volume accepts no writes |
+| `access(path, W_OK)` | succeeds | the write will fail |
+
+Applications believe them. Photos.app exporting 13 files raised 13 separate
+"you don't have permission" errors instead of one honest read-only-volume
+dialog (neo, 2026-08-21).
+
+`rdonly` is an option of `mount(8)` and `/sbin/mount_nfs`, so it travels the
+same path as `soft` and sets `MNT_RDONLY` on the mount itself. The client then
+refuses the write with `EROFS` before anything is sent, and all three signals
+above agree with the refusal.
+
+Both layers ship. rclone's VFS is what makes the refusal *correct*; the kernel
+flag is what makes it *legible*. `rdonly` is scope-gated exactly like
+`--read-only`, so promoting an org to a write scope drops both together.
+
 **These are not yet confirmed against a live mount.** `rclone nfsmount` accepts
 `--option` and the forwarding path is read from rclone 1.75.0's source, but
 whether macOS `mount(8)` honours every one of them in this position is an
 empirical question. Confirm on the first deploy, and record it:
 
 ```console
-nfsstat -m | sed -n '/GDrive/,/^$/p'     # expect soft,intr,timeo=100,retrans=5,dumbtimer
+# read-only org: expect soft,intr,timeo=100,retrans=5,dumbtimer AND read-only
+nfsstat -m | sed -n '/GDrive/,/^$/p'
+# the same fact from the kernel's own mount table
+mount | grep GDrive                      # expect "(nfs, read-only, ...)"
 ```
 
 `docs/evidence/TEMPLATE-mount-bakeoff.md` is the form. If an option does not
@@ -335,6 +368,7 @@ writing). Raw per-org JSON at `<indexStateDir>/<org>.json`.
 | plain `umount` says `Resource busy` right after activity | NFS handles still cached | stop the agent instead (`launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.<org>-root` sends SIGTERM; rclone unmounts cleanly), or `umount -f` |
 | slow first `ls` of a big directory | cold VFS dir cache | expected once; the dir-cache TTL keeps it warm after — use the index for search, not `ls`, on a cold mount |
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |
+| an app reports "you don't have permission" once **per file** when writing to a read-only mount, instead of naming the volume | `rdonly` did not reach the kernel, so the VFS refusal arrives as `NFS3ERR_ACCES` and every read-only signal (`MNT_RDONLY`, `statvfs` `ST_RDONLY`, `access(W_OK)`) disagrees with it | `mount \| grep GDrive` must say `read-only`. If it does not, the option was rejected or the unit predates it — kickstart the agent, then see "Mount semantics" |
 | a write looks accepted but silently vanishes, or the mount is still read-only after promotion | `orgs.json` `scope` was flipped but the token was never re-minted | scope lives in the token, not the config file — re-run `just mint-token <org>` after any scope change; see `docs/sops-integration.md` |
 | `render-config` warns "missing unreadable secret" for one org and no other org is affected | that org's secret isn't seeded in `lab`, or it's enabled in `orgs.json` but never wired into the lab wrapper | seed it (`docs/adoption.md`), wire `secrets.<org>` in the wrapper, re-switch — an unwired org must degrade alone, never take down another org's mount |
 | one agent shows a single failed-then-recovered launch in the first ~30s after a fresh switch | sops secret decryption hadn't finished before the agent's first launch attempt | self-heals; only worth investigating if it recurs past that first launch |
