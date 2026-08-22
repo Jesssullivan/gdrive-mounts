@@ -68,8 +68,24 @@ let
     { platform, settings }:
     if platform == "darwin" then settings.backendDarwin else settings.backendLinux;
 
-  # An org is read-only unless its OAuth scope is the full `drive`.
-  readOnly = org: (org.scope or "drive.readonly") != "drive";
+  # OAuth scopes that grant writes. `drive` grants them over the whole Drive;
+  # `drive.file` grants the same verbs — create, read, update, delete — but only
+  # over files this client itself created or the user explicitly opened with it.
+  # It is a *narrower* write scope, not a read scope, and it is the smallest
+  # blast radius Google offers for a mount that has to accept an occasional
+  # write. Treating it as read-only made exactly that option unreachable.
+  writeScopes = [
+    "drive"
+    "drive.file"
+  ];
+
+  # An org is read-only unless its OAuth scope grants writes. Stated as an
+  # allowlist of write scopes rather than `!= "drive"`, so the default is the
+  # safe one in both directions: an absent scope keeps the documented
+  # `drive.readonly` default, and a scope this repo has never heard of — a
+  # future `drive.appdata`, a typo — resolves read-only instead of silently
+  # inheriting write semantics.
+  readOnly = org: !(elem (org.scope or "drive.readonly") writeScopes);
 
   # One rendered config per org. rclone writes refreshed tokens back into the
   # file it was given, so a single writer per file is a correctness rule.

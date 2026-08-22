@@ -75,6 +75,25 @@
       "links": []
     },
     {
+      "name": "filelab",
+      "account": "tester@example.dev",
+      "enabled": true,
+      "driveKind": "mydrive",
+      "remote": "gdrive-filelab",
+      "scope": "drive.file",
+      "promotionTarget": "drive.file",
+      "secretEnvPrefix": "GDM_FILELAB",
+      "mounts": [
+        {
+          "name": "root",
+          "remotePath": "",
+          "mountSuffix": "filelab",
+          "note": "Narrow-write org. Proves --read-only is absent for drive.file: it grants create/update/delete, scoped to the files this client created, so it is a write scope and not a read one."
+        }
+      ],
+      "links": []
+    },
+    {
       "name": "parked",
       "account": "tester@example.com",
       "enabled": false,
