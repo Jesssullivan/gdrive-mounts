@@ -59,6 +59,42 @@ Phases, in order: `start`, `guard`, `sweep`, `render`, `exec`. The argv on the
 
 ## The wedge, and the watchdog that clears it
 
+> **2026-09-05 — the restart loop, and what it actually was.** neo restarted
+> `sulliwood-root` **606 times** between 2026-08-22 and 2026-09-05, one every
+> 6-25 minutes for the last 14 hours of that window. The full diagnostic pass
+> is `~/git/finances/docs/agent-notes/2026-09-04-gdrive-neo-wedge-diagnosis.md`.
+> Four findings, all of which changed code here:
+>
+> 1. **rclone was not crashing.** 443 `SIGQUIT` blocks in the unit `.err.log`
+>    against **zero** SIGSEGV, SIGBUS, panic or fatal error in 208,067 lines.
+>    Every one was induced by the watchdog's own evidence capture. The
+>    watchdog now says so: `induced traceback (not a crash)`.
+> 2. **It was a latency wedge, not a fault.** A cold Drive root listing
+>    measured **12.766s**; the mount was built with `timeo=100`, which is
+>    **10s** on macOS. go-nfs answers one connection serially, so one slow
+>    `READDIRPLUS` stalled the whole conversation past the client's patience
+>    and macOS set `0x2,not responding`. Now `timeo=600` / `retrans=10`.
+> 3. **The `stat` probe was inert.** macOS answered it from the root attribute
+>    cache, so it reported `ok` through **345 of 377** flag-driven wedges — the
+>    OR of two signals had quietly become the kernel flag alone. Now a readdir,
+>    AND-combined.
+> 4. **The watchdog converted a self-clearing stall into a cold start.** 271
+>    recorded self-recoveries against those 606 restarts, and each restart
+>    discarded an in-process dir cache with no on-disk backing, guaranteeing
+>    the next cold walk inside the floor. Threshold 2 -> 5, floor 300s ->
+>    1800s, grace +180s -> +900s, and `--vfs-refresh` warms the tree at start.
+>
+> yoga never wedged, on the same rclone, the same remote and the same watchdog
+> logic: on Linux the module uses `rclone mount` (FUSE), and there is no RPC
+> timeout in that path at all.
+>
+> **Not proven, and worth knowing before you tune further:** whether the
+> `timeo` raise alone would have ended the loop (12.766s was one measurement of
+> one shallow listing on a loaded host — deeper directories may cost more than
+> 60s); what generated 526k READDIRPLUS and 1.44M ACCESS calls (Spotlight is
+> confirmed off for the mount); and why the index runs were failing (no
+> `rateLimitExceeded`, `429` or `quotaExceeded` line was found anywhere).
+
 A mount can stop serving while every process involved stays alive. Both
 observed forms were captured on neo on 2026-08-19 —
 `docs/evidence/2026-08-19-nfs-wedge.md` has the dumps:

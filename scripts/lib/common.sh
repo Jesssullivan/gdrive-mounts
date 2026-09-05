@@ -77,6 +77,14 @@ assert_gnu_coreutils() {
 # `mode 755 (want 600)` for every secret on every host while the real files
 # were 0400. The check was comparing the wrong inode, not finding a problem.
 file_mode() {
+  # Fail closed on anything that does not resolve, and do it here so both
+  # dialects agree. `-e` follows symlinks, so a DANGLING link answers empty —
+  # which GNU stat does on its own (it errors) and BSD stat does not: macOS
+  # `stat -L` silently falls back to lstat and reports the link's own mode.
+  # Without this guard the same broken secret path would read `<empty>` on
+  # Linux and `700` on Darwin, and a caller comparing against 600 would print
+  # a mode for a file that is not there.
+  [ -e "$1" ] || return 1
   if stat --version >/dev/null 2>&1; then
     stat -L -c '%a' -- "$1" 2>/dev/null
   else

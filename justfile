@@ -11,7 +11,7 @@ default:
 # ── Local gates ─────────────────────────────────────────────────────────────
 
 # Every gate that runs without a build slot. This is the day-to-day gate.
-check: validate secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval
+check: validate test-lib secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval
 
 # Everything in `check` plus the two gates that need a builder or a bazel fetch.
 check-ci: check flake-check bazel-test
@@ -19,6 +19,10 @@ check-ci: check flake-check bazel-test
 # Validate orgs.json, the nix settings SSOT, and the render pipeline (dummy secrets).
 validate:
     bash scripts/validate-config.sh
+
+# Unit-test scripts/lib/common.sh in a temp dir. No network, no real secrets.
+test-lib:
+    bash scripts/test-lib.sh
 
 # gitleaks over the working tree, fail-closed. History is a CI lane.
 secrets-scan-dir:
