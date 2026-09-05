@@ -25,8 +25,8 @@
     "watchdogEnable": true,
     "watchdogIntervalSec": 60,
     "watchdogProbeTimeoutSec": 10,
-    "watchdogFailureThreshold": 2,
-    "watchdogRestartFloorSec": 300
+    "watchdogFailureThreshold": 5,
+    "watchdogRestartFloorSec": 1800
   },
   "orgs": [
     {

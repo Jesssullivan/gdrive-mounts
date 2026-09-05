@@ -79,24 +79,48 @@ Each cycle (60s by default) it:
 1. Stands down if the mount unit is not loaded — an operator who stopped a
    mount does not get it resurrected — or if nothing is mounted yet and the
    unit is younger than the grace window (the cache guard's own budget plus
-   three minutes; the guard alone may legitimately wait two minutes). The grace
+   fifteen minutes; the guard alone may legitimately wait two minutes, and a
+   cold `nfsmount` then has to walk the remote before it answers). The grace
    applies only until the watchdog has seen the point mounted once; after that
    a disappearance is unambiguous and is acted on immediately.
 2. Probes two ways: the kernel's `nfsstat -m` status flags, which answer even
-   while the mount does not, and a bounded `stat` run from an expendable child.
-   The child is *abandoned* rather than waited on — a `hard,nointr` caller
-   blocks in the kernel where no signal lands, so `timeout` cannot rescue it.
-3. Counts consecutive failures. It acts on the **second**, never the first: the
-   `not responding` flag is observed to set and clear on its own within a
-   minute, and a single-sample watchdog would restart the mount continuously.
-4. On confirmation: captures first — `nfsstat -m` plus `core/stats`,
+   while the mount does not, and a bounded **readdir** (`ls -1f`) run from an
+   expendable child. The child is *abandoned* rather than waited on — a
+   `hard,nointr` caller blocks in the kernel where no signal lands, so
+   `timeout` cannot rescue it.
+
+   It is a readdir and not a `stat` deliberately. macOS answers `stat` on a
+   mountpoint out of the root attribute cache (`acrootdirmin=5`), so the old
+   `stat` probe returned `ok` through **345 of 377** flag-driven wedges on neo
+   — the filesystem half of the verdict was inert. A readdir goes to the wire.
+3. Combines the two with **AND**, not OR: a flag on its own is logged and
+   waited out, and only a flag *plus* a genuinely failed filesystem call counts
+   as a failure. The `not responding` flag sets and clears by itself — 271
+   recorded self-recoveries on neo against 606 restarts — so treating it as a
+   verdict on its own is what built a restart loop. On Linux there is no kernel
+   signal to AND with and the filesystem call decides alone.
+4. Counts consecutive failures and acts on the **fifth**
+   (`watchdogFailureThreshold`), i.e. after five minutes of *sustained*
+   unhealth at the 60s interval. Two was not enough: the flag commonly clears
+   after three or four minutes.
+5. On confirmation: captures first — `nfsstat -m` plus `core/stats`,
    `core/pid`, `vfs/stats` over the rc unix socket, then `SIGQUIT`, which makes
    the Go runtime dump every goroutine to the unit's `.err.log`. SIGQUIT is a
    capture *and* a kill, so it only ever runs on the path that restarts anyway.
-5. Restarts the mount unit, and writes a wedge record.
-6. Will not restart the same mount again inside `watchdogRestartFloorSec`
-   (300s). A held wedge is still recorded — the floor suppresses the restart,
-   never the evidence.
+
+   **That dump is not a crash.** It opens `SIGQUIT: quit` followed by a full
+   register dump and reads exactly like a native fault; the watchdog induces
+   every one. neo's `.err.log` held 443 of them against zero `SIGSEGV`, zero
+   `SIGBUS`, zero `panic` and zero `fatal error` in 208,067 lines. The
+   watchdog log says so on the line above each one: `induced traceback (not a
+   crash)`.
+6. Restarts the mount unit, and writes a wedge record.
+7. Will not restart the same mount again inside `watchdogRestartFloorSec`
+   (1800s). A held wedge is still recorded — the floor suppresses the restart,
+   never the evidence. The floor is long because a restart `SIGKILL`s rclone
+   and throws away an **in-process** dir cache with no on-disk backing, so the
+   replacement re-walks Drive cold; a floor shorter than a cold start simply
+   re-arms the loop.
 
 ### Reading a wedge record
 
@@ -116,7 +140,12 @@ $ jq -c . ~/.local/state/gdrive-mounts/wedge.sulliwood-root.jsonl | tail -3
 | `restart_count` | cumulative restarts for this mount, derived from the file itself |
 | `uptime_sec` | how long the mount survived this time — the recurrence metric |
 | `nfs_status_flags` | `0x2,not responding` = the kernel gave up; `none` on Linux |
-| `probe` | `timeout` (a call never returned), `error`, or `unmounted` (nothing was mounted at all — the quiet class) |
+| `probe` | the readdir result: `timeout` (a call never returned), `error`, or `unmounted` (nothing was mounted at all — the quiet class) |
+
+A record with `"nfs_status_flags":"0x2,not responding"` and `"probe":"ok"` is
+the signature of the pre-2026-09-05 watchdog, whose `stat` probe was answered
+from the attribute cache. It cannot be produced any more: the readdir probe and
+the AND rule mean a restart requires both signals to have failed.
 
 A rising `restart_count` with a *falling* `uptime_sec` means the mount is
 degrading, not merely flapping. Escalate on that, not on a single record.
@@ -127,10 +156,11 @@ a heartbeat hourly, every unhealthy cycle, and every decision. Captures land in
 `<stateDir>/wedge-capture.<org>-<mount>.log`, and the goroutine dump in the
 mount unit's own `.err.log`.
 
-**Neither file is ever rotated or truncated by this repo, deliberately** —
+**The captures are never rotated or truncated by this repo, deliberately** —
 launchd appends, and the pre-restart evidence is the whole point. Rotate them
 by hand when they get large; never let a cleanup delete a capture you have not
-read.
+read. The mount unit's `.err.log` and the wedge record are the exception: both
+are size-capped at start (see "Log hygiene").
 
 ### Turning it off
 

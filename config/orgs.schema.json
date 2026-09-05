@@ -132,12 +132,12 @@
         "watchdogFailureThreshold": {
           "type": "integer",
           "minimum": 2,
-          "description": "Consecutive failed probes before the watchdog acts. Never 1: the not-responding flag is observed to flap on a ~15s timescale and clear on its own."
+          "description": "Consecutive failed probes before the watchdog acts. Never 1: the not-responding flag is observed to flap on a ~15s timescale and clear on its own. Raised 2 -> 5 on 2026-09-05: at intervalSec=60 a threshold of 2 acts after ~2 minutes, and neo recorded 271 self-recoveries commonly clearing after 3-4 minutes against 606 restarts — the watchdog was restarting through roughly two-thirds of a population of stalls that resolve on their own. 5 means five minutes of SUSTAINED unhealth."
         },
         "watchdogRestartFloorSec": {
           "type": "integer",
           "minimum": 60,
-          "description": "Minimum seconds between watchdog restarts of one mount. Held wedges are still recorded, so a floor hides nothing."
+          "description": "Minimum seconds between watchdog restarts of one mount. Held wedges are still recorded, so a floor hides nothing. Raised 300 -> 1800 on 2026-09-05: a restart SIGKILLs rclone and discards an in-process dir cache that has no on-disk backing, so the replacement must re-walk Drive cold. Restart uptimes on neo clustered at 380-1600s — never long enough to warm the tree — so a 300s floor let the loop re-arm before a cold start could ever reach steady state."
         }
       }
     },

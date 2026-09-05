@@ -290,7 +290,14 @@ let
         # Derived, never a knob of its own: it must never be shorter than the
         # cache guard's own budget, or the watchdog would restart a mount that
         # is legitimately still waiting for its volume.
-        mountGraceSec = cfg.cache.waitSeconds + 180;
+        #
+        # +900, not +180, since 2026-09-05. A cold `nfsmount` has to clear the
+        # sweep, sit through the cache guard, and then walk the remote before it
+        # answers; on a large Drive that is minutes, not seconds. With the old
+        # 300s budget neo restarted instances that had never finished coming up
+        # — 03:18:13 started pid 9635, 03:19:20 started pid 9830, 67 seconds
+        # apart — which is a loop, not supervision.
+        mountGraceSec = cfg.cache.waitSeconds + 900;
         nfsStatus = cfg.platform == "darwin" && backend == "nfsmount";
         mountedCheck = isMountedNonBlocking u.point;
         unitActiveCheck = unitActiveCheck u;
@@ -895,6 +902,15 @@ in
           Consecutive failed probes before the watchdog acts. Never 1: the
           macOS "not responding" flag is observed to set and clear on its own
           within a single minute.
+
+          2 was not enough either. At `intervalSec = 60` it acts after about
+          two minutes, and the flag commonly clears after three or four: neo
+          logged 271 self-recoveries against 606 restarts between 2026-08-22
+          and 2026-09-05, so the watchdog was restarting through roughly
+          two-thirds of a population of stalls that resolve on their own — and
+          each restart discards rclone's in-process dir cache and guarantees
+          the next cold walk. The default is now 5, i.e. five minutes of
+          *sustained* unhealth.
         '';
       };
       restartFloorSec = mkOption {
@@ -905,6 +921,13 @@ in
           Minimum seconds between watchdog restarts of one mount. Held wedges
           are still written to the wedge record, so the floor suppresses the
           restart, never the evidence.
+
+          The floor has to outlast a cold start, not merely a probe cycle.
+          `--dir-cache-time` is a TTL on an *in-process* cache with no on-disk
+          backing, so `launchctl kickstart -k` throws the warm tree away and
+          the replacement re-walks Drive from cold. Restart uptimes on neo
+          clustered at 380-1600s under the old 300s floor — the loop re-armed
+          before any instance reached steady state. The default is now 1800.
         '';
       };
     };

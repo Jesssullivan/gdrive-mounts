@@ -246,6 +246,23 @@ let
     ++ optionals (backend == "nfsmount") [
       "--nfs-cache-handle-limit"
       (toString settings.nfsCacheHandleLimit)
+      # Walk the tree into the VFS dir cache in the background at start, so the
+      # first NFS readdir is not the cold one.
+      #
+      # `--dir-cache-time 720h` is a TTL on an IN-PROCESS cache; there is no
+      # on-disk dir cache, so every start — and every watchdog restart — begins
+      # cold and must re-walk Drive at ~12.7s per uncached directory. That cold
+      # walk is the thing the NFS client's `timeo` is racing (see
+      # nfsMountOptions), and losing that race is what set `0x2,not responding`
+      # 606 times on neo between 2026-08-22 and 2026-09-05. Refreshing in the
+      # background moves the walk off the critical path of the first user
+      # readdir instead of leaving it there.
+      #
+      # nfsmount-gated because that is where the race exists: `rclone mount`
+      # (FUSE, Linux) has no RPC timeout between the kernel and rclone at all.
+      # Present in rclone 1.75.0 (`rclone nfsmount --help | grep vfs-refresh`,
+      # verified 2026-09-05).
+      "--vfs-refresh"
     ]
     # NFS *client* mount options, nfsmount only. rclone does not interpret
     # these: on Darwin `rclone nfsmount` shells out to mount(8) as
@@ -432,6 +449,25 @@ let
       unitPidCommand, # prints the mount unit's pid, or nothing
       restartCommand, # restarts the mount unit
     }:
+    let
+      # The AND arm, emitted only where a kernel-side signal exists to AND with.
+      # On Linux `gdm_nfs_status` is `true` and the flags are always empty, so
+      # emitting this there would make every probe pass and disable the watchdog
+      # outright. Held in a `let` rather than inlined because nix indents only
+      # the first line of an interpolated block, and this one has to read
+      # correctly in the generated script.
+      kernelMustAgree =
+        if nfsStatus then
+          ''
+            case "$gdm_probe_flags" in
+                    "" | 0x0)
+                      gdm_log "probe: the filesystem call did not come back (''${gdm_probe_fs_result}) but the kernel does not flag the mount — waiting it out, not counting a failure"
+                      return 0
+                      ;;
+                  esac''
+        else
+          "";
+    in
     ''
       interval=${toString intervalSec}
       probe_timeout=${toString probeTimeoutSec}
@@ -442,7 +478,7 @@ let
       cycles=0
       seen_mounted=0
       gdm_probe_flags=""
-      gdm_probe_stat_result=""
+      gdm_probe_fs_result=""
 
       # Hourly, whatever the interval. The watchdog's heartbeat is why the mount
       # itself can run with `--stats 0`: one liveness line an hour beats a stats
@@ -517,8 +553,18 @@ let
       # do. The abandoned process is the price of asking the question; it goes
       # away with the mount we are about to replace.
       #
+      # The call is a READDIR, not a `stat`. This is the whole difference between
+      # a probe and a decoration: macOS answers `stat "$point/."` out of the root
+      # attribute cache (`acrootdirmin=5 acrootdirmax=60`), so on neo it returned
+      # `ok` through 345 of 377 recorded flag-driven wedges — reducing a verdict
+      # that was designed to need two independent signals to the kernel flag
+      # alone. A readdir cannot be served from that cache: it goes to the wire,
+      # which is exactly where the wedge is. `ls -1f` is the cheapest spelling —
+      # `-f` disables sorting and stat-ing the entries, so it is one readdir and
+      # no per-entry GETATTR storm against a mount that may already be sick.
+      #
       # Prints exactly one of: ok | error | timeout.
-      gdm_probe_stat() {
+      gdm_probe_fs() {
         local sentinel rc waited probe_pid
         waited=0
         mkdir -p "$probe_dir"
@@ -533,7 +579,7 @@ let
         # thing for the verdict to depend on, so the subshell no longer does.
         (
           rc=0
-          stat -- "$point/." >/dev/null 2>&1 || rc=$?
+          ls -1f -- "$point" >/dev/null 2>&1 || rc=$?
           printf '%s' "$rc" > "$sentinel"
         ) &
         probe_pid=$!
@@ -556,18 +602,31 @@ let
         return 1
       }
 
-      # One verdict from two independent signals, OR-combined: either the kernel
-      # says the server stopped answering, or a real filesystem call did not come
-      # back. Neither alone is trusted to act — that is what the threshold is for.
+      # One verdict from two independent signals, AND-combined where both exist:
+      # the kernel has to say the server stopped answering AND a real filesystem
+      # call has to have failed to come back. Either alone is logged and waited
+      # out.
+      #
+      # It was an OR until 2026-09-05, and the OR is what built the restart loop
+      # on neo. The flag sets and clears on its own — 271 recorded self-recoveries
+      # against 606 restarts between 2026-08-22 and 2026-09-05, commonly clearing
+      # after 3-4 minutes — while the old `stat` probe answered `ok` out of the
+      # attribute cache through 345 of those. An OR of "flapping" and "always ok"
+      # is the flag alone, which is precisely the single-signal behaviour the
+      # design set out to avoid.
       gdm_probe() {
         gdm_probe_flags="$(gdm_nfs_status || true)"
-        gdm_probe_stat_result="$(gdm_probe_stat || true)"
-        case "$gdm_probe_flags" in
-          "" | 0x0) ;;
-          *) return 1 ;;
-        esac
-        [ "$gdm_probe_stat_result" = ok ] || return 1
-        return 0
+        gdm_probe_fs_result="$(gdm_probe_fs || true)"
+
+        # The filesystem call is the signal a user actually experiences, and it
+        # is the only signal on Linux, so it decides on its own when it passes.
+        if [ "$gdm_probe_fs_result" = ok ]; then
+          return 0
+        fi
+
+        # …and when it fails, the kernel has to agree before this counts.
+        ${kernelMustAgree}
+        return 1
       }
 
       # Everything worth having BEFORE the mount is replaced.
@@ -580,13 +639,22 @@ let
       # SIGQUIT then makes the Go runtime print every goroutine to stderr (the
       # unit's .err.log) and exit. It is a capture *and* a kill, which is exactly
       # why it only ever runs on the path that is about to restart the mount.
+      #
+      # SAY SO IN THE LOG. The resulting block in the .err.log opens
+      # `SIGQUIT: quit` followed by a full register dump, which reads exactly
+      # like a native crash — and was read as one: a triage pass on neo in
+      # 2026-09 opened with "rclone is crashing" on the strength of 443 of these
+      # blocks, against zero SIGSEGV, zero SIGBUS, zero panic and zero fatal
+      # error in 208,067 lines. The traceback is induced by the line below,
+      # every time, so the line below is where it has to be labelled.
       gdm_capture() { # pid
         local pid c
         pid="''${1:-}"
         {
           printf '=== %s %s wedge capture (pid %s) ===\n' "$(gdm_now)" "$unit" "''${pid:-none}"
-          printf 'probe: flags=%s stat=%s consecutive=%s\n' \
-            "''${gdm_probe_flags:-none}" "''${gdm_probe_stat_result:-none}" "$consecutive"
+          printf 'note: the SIGQUIT traceback in the unit err log is INDUCED BY THIS WATCHDOG (not a crash)\n'
+          printf 'probe: flags=%s fs=%s consecutive=%s\n' \
+            "''${gdm_probe_flags:-none}" "''${gdm_probe_fs_result:-none}" "$consecutive"
           ${if nfsStatus then "nfsstat -m 2>&1 || true" else "true"}
           if [ -n "''${sock:-}" ] && [ -S "$sock" ]; then
             for c in core/version core/pid core/stats core/memstats vfs/stats; do
@@ -609,11 +677,11 @@ let
         chmod 600 "$capture" 2>/dev/null || true
 
         if [ -n "$pid" ]; then
-          gdm_log "wedge: SIGQUIT $pid — goroutine dump goes to the unit err log"
+          gdm_log "wedge: SIGQUIT $pid — induced traceback (not a crash); the goroutine dump goes to the unit err log"
           kill -QUIT "$pid" 2>/dev/null || true
           sleep 3
         else
-          gdm_log "wedge: no pid to signal — skipping the goroutine dump"
+          gdm_log "wedge: no pid to signal — skipping the induced traceback"
         fi
       }
 
@@ -638,7 +706,7 @@ let
         fi
         printf '{"ts":"%s","unit":"%s","point":"%s","action":"%s","restart_count":%s,"consecutive_failures":%s,"pid":"%s","uptime_sec":"%s","nfs_status_flags":"%s","probe":"%s"}\n' \
           "$(gdm_now)" "$unit" "$point" "$action" "$n" "$consecutive" \
-          "''${pid:-none}" "''${uptime:-unknown}" "''${gdm_probe_flags:-none}" "''${gdm_probe_stat_result:-none}" \
+          "''${pid:-none}" "''${uptime:-unknown}" "''${gdm_probe_flags:-none}" "''${gdm_probe_fs_result:-none}" \
           >> "$record"
         chmod 600 "$record" 2>/dev/null || true
       }
@@ -667,7 +735,7 @@ let
           return 0
         fi
 
-        gdm_log "wedge: confirmed after $consecutive consecutive failures (flags=[''${gdm_probe_flags:-none}] stat=''${gdm_probe_stat_result:-none} pid=''${pid:-none} uptime=''${uptime}s)"
+        gdm_log "wedge: confirmed after $consecutive consecutive failures (flags=[''${gdm_probe_flags:-none}] fs=''${gdm_probe_fs_result:-none} pid=''${pid:-none} uptime=''${uptime}s)"
         gdm_capture "$pid"
         # Stamp and record before restarting: the restart may take this process
         # down with it, and an unrecorded wedge is an unmeasurable one.
@@ -691,7 +759,7 @@ let
       gdm_note_failure() {
         cycles=$((cycles + 1))
         consecutive=$((consecutive + 1))
-        gdm_log "probe: unhealthy ($consecutive/$threshold) — flags=[''${gdm_probe_flags:-none}] stat=''${gdm_probe_stat_result:-none}"
+        gdm_log "probe: unhealthy ($consecutive/$threshold) — flags=[''${gdm_probe_flags:-none}] fs=''${gdm_probe_fs_result:-none}"
         if [ "$consecutive" -ge "$threshold" ]; then
           gdm_handle_wedge
         fi
@@ -737,7 +805,7 @@ let
             fi
           fi
           gdm_probe_flags=""
-          gdm_probe_stat_result="unmounted"
+          gdm_probe_fs_result="unmounted"
           gdm_note_failure
           return 0
         fi
