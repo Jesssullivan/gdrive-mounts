@@ -30,15 +30,52 @@ bumps the pinned input.
 Dependency pin: rclone comes from nixpkgs (1.75.0 at time of writing) via
 this repo's `flake.nix`. No brew delivery for any part of this stack.
 
-CI enrollment authority: `Jesssullivan/jesssullivan-infra` PR #92
-(`tofu/stacks/arc-runners/jesssullivan.tfvars`,
-`extra_runner_sets.gdrive-mounts-nix`) adds the `tinyland-nix` runner set for
-this repo. Applying that runner set is an operator `workflow_dispatch` act in
-that repo, not an agent act. After the apply, the operator sets the repo
-variable `GF_ENROLLED=true` (`gh variable set GF_ENROLLED --body true`) to
-turn the `check (tinyland-nix)` job on, and makes it a required check once
-one run is green. The lanes themselves live in `.github/workflows/ci.yml`
-here; the hosted `public-source` lane is the required gate until then.
+## CI posture — GloriousFlywheel v4 only, and it does not run yet
+
+CI here is one thing: the v4 action fabric. `.github/workflows/ci.yml` is a
+thin caller into `tinyland-inc/ci-templates`
+`.github/workflows/spoke-ci-v4.yml`, pinned at
+`32e39ced0008edf4564ebeb173a5e8fbf069e28f` (v5.1.0). It submits exactly one
+action — `check`, declared in `.github/lanes.json` as
+`test //:ci_validation_suite`, capability `rbe-linux-x86_64`, result
+`status-only`. Every gate this repo enforces is a registered Bazel target in
+that suite; adding a gate means adding a target, not adding a job.
+
+There is no hosted lane, no `ubuntu-latest` or `macos-latest` fallback, no
+gate, no bridge, and no interim runner. That is a ruling (operator,
+2026-09-05), not an implementation gap to be filled in later.
+
+**The v4 check cannot pass today, and that is the ratified state.** The v4
+dispatch edge is an owner-overlay runner scale set, and GloriousFlywheel law
+admits organizations only:
+`tofu/modules/arc-runner/main.tf:112` requires
+`var.owner_overlay_github_account_kind == "organization"`, alongside the
+`gf-v4-dispatch` plane id, label, and `arc-runners-<owner-slug>` namespace.
+`Jesssullivan` is a personal user account, so it cannot be a v4 owner — no
+`gf-v4-dispatch` runner answers for this repo, and the job stays queued or
+fails at dispatch. The named gap is: **no v4 owner organization is chosen for
+this repo, so no `gf-v4-dispatch` runner group exists.** It closes when Jess
+picks an organization and that organization's owner ceremony lands, not
+before, and nothing in this repo can close it.
+
+Retired with the hosted lanes, so nobody re-derives them from history:
+
+- The repo variable `GF_ENROLLED` and the `check (tinyland-nix)` job it gated.
+  The variable is not set on the repo and the job no longer exists.
+- `Jesssullivan/jesssullivan-infra` PR #92
+  (`tofu/stacks/arc-runners/jesssullivan.tfvars`,
+  `extra_runner_sets.gdrive-mounts-nix`). That PR delivered a **v3** runner
+  set on the `tinyland-nix` label. v4 does not use it: the v4 fabric dispatches
+  to `gf-v4-dispatch` and executes Bazel actions through the GF action client,
+  never on a `tinyland-nix` runner. Applying PR #92 would not make this repo's
+  CI run.
+- The `tinyland-nix` execution pool claim in `tinyland.repo.json`. The
+  manifest no longer carries an `enrollment` block, because this repo has no
+  enrollment to declare.
+
+Local verification is unchanged and is the operator's real gate until the
+fabric can run: `nix develop --command just check` for the day-to-day pass,
+`nix develop --command just check-ci` for the exact suite v4 would submit.
 
 ## sting posture
 
