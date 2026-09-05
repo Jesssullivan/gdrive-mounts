@@ -789,7 +789,7 @@ in
       type = types.listOf types.str;
       default = fromRegistry.nfsMountOptions;
       defaultText = literalMD "`orgs.json` `defaults.nfsMountOptions`";
-      example = literalExpression ''[ "intr" "timeo=100" "retrans=5" "dumbtimer" ]'';
+      example = literalExpression ''[ "intr" "timeo=600" "retrans=10" "dumbtimer" ]'';
       description = ''
         NFS client mount options, emitted one per `--option`. Emitted only when
         the backend is `nfsmount`; on `rclone mount` the same flag means libfuse
@@ -806,10 +806,19 @@ in
         `soft`+`intr` make a stalled call fail with `EIO` and make its caller
         killable, instead of blocking forever in the kernel where no signal is
         delivered — the state that made the 2026-08-19 wedge bistable and left
-        the watchdog unable even to probe it. `timeo` is in **tenths of a
-        second** on macOS, so `timeo=100` is 10s, and `dumbtimer` keeps the
-        dynamic retransmit estimator from deriving a microsecond timeout from
-        the loopback round-trip.
+        the watchdog unable even to probe it.
+
+        `timeo` is in **tenths of a second** on macOS, so `timeo=600` is 60s
+        per RPC try and `retrans=10` is roughly ten minutes before a `soft`
+        mount gives up with `EIO`. That budget is measured, not chosen: a cold
+        Drive root listing through the rendered config took **12.766s** on neo
+        (2026-09-05), go-nfs answers one connection serially, and the former
+        `timeo=100` (10s) was therefore *shorter than a single cold
+        READDIRPLUS* — the client gave up on the very first try, retransmitted
+        into a handler still inside the same Drive call, and macOS set
+        `0x2,not responding`. `dumbtimer` keeps the dynamic retransmit
+        estimator from deriving a microsecond timeout from the loopback
+        round-trip.
 
         `soft` can surface a stalled write as an I/O error, so it is refused on
         a read-write org (see the assertion). Confirm any change actually landed
@@ -996,7 +1005,7 @@ in
 
               # keep hard semantics everywhere (safe, but a stall stays permanent)
               programs.gdrive-mounts.nfsMountOptions =
-                [ "intr" "timeo=100" "retrans=5" "dumbtimer" ];
+                [ "intr" "timeo=600" "retrans=10" "dumbtimer" ];
 
             or, having considered the write path, accept the trade explicitly:
 

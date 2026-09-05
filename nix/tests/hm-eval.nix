@@ -861,12 +861,17 @@ let
       # estimator would otherwise derive a microsecond timeout from a loopback
       # RTT — which is why the stock mount gives up after ~1s on a Drive call
       # that rclone thinks is fine. Assert the ratified set on the real registry.
+      #
+      # Re-ratified 2026-09-05: timeo=600 (60s), retrans=10. A cold Drive root
+      # listing measured 12.766s on neo, so the previous timeo=100 (10s) was
+      # below the cost of a single cold READDIRPLUS and the client gave up on
+      # its first try, every time the mount started cold.
       name = "production-nfs-mount-options-are-the-ratified-ones";
       ok =
         let
           o = prodData.defaults.nfsMountOptions;
         in
-        elem "soft" o && elem "intr" o && elem "timeo=100" o && elem "retrans=5" o && elem "dumbtimer" o;
+        elem "soft" o && elem "intr" o && elem "timeo=600" o && elem "retrans=10" o && elem "dumbtimer" o;
     }
     # ── the read-only mount lies to the kernel (neo, 2026-08-21) ───────────────
     {
@@ -1079,7 +1084,7 @@ else
     # what needs it: `soft` passes through bare, `timeo=100` comes out
     # single-quoted because of the `=`. Asserting the bare form only would have
     # passed for three of the five and quietly missed the other two.
-    for o in soft intr timeo=100 retrans=5 dumbtimer; do
+    for o in soft intr timeo=600 retrans=10 dumbtimer; do
       grep -qE -- "--option '?$o'?" "$dsul"
     done
     no grep -q -- '--option' "$lsul"

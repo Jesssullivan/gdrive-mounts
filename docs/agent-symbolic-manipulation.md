@@ -338,8 +338,8 @@ sqlite3 ~/.local/state/gdrive-index/index.sqlite \
 
 ## Durability under soft + RW
 
-`defaults.nfsMountOptions` keeps `soft` (with `intr`, `timeo=100`,
-`retrans=5`, `dumbtimer`), and the module refuses to activate a read-write
+`defaults.nfsMountOptions` keeps `soft` (with `intr`, `timeo=600`,
+`retrans=10`, `dumbtimer`), and the module refuses to activate a read-write
 unit with `soft` present unless the operator sets
 `programs.gdrive-mounts.allowSoftReadWrite = true` — fail-closed, so the
 fact that the RW switch activated at all means that durability trade was
@@ -387,7 +387,7 @@ output pasted, one-sentence verdict (`docs/evidence/README.md`).
 3. `/usr/bin/stat -f %d` on `~/GDrive` vs `~/GDrive/sulliwood` — different
    device numbers.
 4. `nfsstat -m | sed -n '/GDrive\/sulliwood/,/^$/p'` — no `not responding`;
-   options still show `soft,intr,timeo=100,retrans=5,dumbtimer` (and, on any
+   options still show `soft,intr,timeo=600,retrans=10,dumbtimer` (and, on any
    remaining read-only org, `rdonly` — the still-pending live confirmation
    from `docs/runbook.md` "Mount semantics").
 5. The write probe: `touch`+`rm` of `.gdm-write-probe` under `GFTB Stuff`

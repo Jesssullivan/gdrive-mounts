@@ -226,8 +226,8 @@ client. `defaults.nfsMountOptions` is that list:
 |---|---|
 | `soft` | a stalled call fails with `EIO` after `retrans` intervals instead of blocking forever — recoverable, and *visible* to the watchdog |
 | `intr` | its caller can be interrupted, so a wedged `ls` can be killed |
-| `timeo=100` | **tenths of a second** on macOS, so 10s — the stock default is 1s |
-| `retrans=5` | retransmits before a soft mount gives up |
+| `timeo=600` | **tenths of a second** on macOS, so 60s per RPC try — the stock default is 1s. Raised from `timeo=100` (10s) on 2026-09-05: a cold Drive root listing measured **12.766s**, so the client was giving up before a single cold `READDIRPLUS` could ever return |
+| `retrans=10` | retransmits before a soft mount gives up — ~10 minutes of patience at `timeo=600`, after which `soft` still returns `EIO` rather than blocking |
 | `dumbtimer` | use `timeo` literally. Without it the client derives its timeout from the observed round trip, and on a *loopback* server that estimate is microseconds — which is the real reason the stock mount gives up so fast on a Drive-backed call |
 
 `soft` is refused on a read-write mount unless
@@ -271,7 +271,7 @@ whether macOS `mount(8)` honours every one of them in this position is an
 empirical question. Confirm on the first deploy, and record it:
 
 ```console
-# read-only org: expect soft,intr,timeo=100,retrans=5,dumbtimer AND read-only
+# read-only org: expect soft,intr,timeo=600,retrans=10,dumbtimer AND read-only
 nfsstat -m | sed -n '/GDrive/,/^$/p'
 # the same fact from the kernel's own mount table
 mount | grep GDrive                      # expect "(nfs, read-only, ...)"
