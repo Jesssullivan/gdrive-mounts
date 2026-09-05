@@ -1136,6 +1136,24 @@ let
         && !(elem "--vfs-refresh" (argsOf "linux" "sulliwood"));
     }
     {
+      # launchd rotates nothing, and the two files this system appends to
+      # without bound are the unit's own .err.log (13.6 MB / 208,067 lines on
+      # neo, almost all of it watchdog-induced goroutine dumps) and the wedge
+      # record. Copy-truncate, never rename: launchd holds an O_APPEND fd on
+      # the .err.log from before the wrapper execs, so a rename would send
+      # every later line to the renamed copy.
+      name = "the-log-cap-is-copy-truncate-and-keeps-a-generation";
+      ok =
+        let
+          p = plan.shellPreamble;
+        in
+        hasInfix ''cp -pf -- "$f" "$f.1"'' p
+        && hasInfix '': > "$f"'' p
+        && !(hasInfix ''mv -f -- "$f" "$f.1"'' p)
+        && hasInfix "stat -c %s" p
+        && hasInfix "stat -f %z" p;
+    }
+    {
       name = "the-restart-floor-is-read-from-disk-not-from-a-variable";
       ok =
         let
@@ -1300,6 +1318,17 @@ else
       grep -q -- '--log-level INFO' "$f"
       grep -q -- '--stats 0' "$f"
     done
+
+    # The wrapper caps the two unbounded appenders at start, keeping two
+    # generations. On Linux stderr goes to the journal, so only the wedge
+    # record has a path to cap.
+    grep -qF 'gdm_cap_file "$err_log" "$log_max_bytes" 2' "$dsul"
+    grep -qF 'gdm_cap_file "$wedge_record" "$log_max_bytes" 2' "$dsul"
+    grep -qF 'gdrive-mounts.sulliwood-root.err.log' "$dsul"
+    grep -qF 'wedge.sulliwood-root.jsonl' "$dsul"
+    grep -qF 'log_max_bytes=${toString testSettings.logMaxBytes}' "$dsul"
+    # …and the Linux wrapper names no log file, because there is none to name.
+    grep -qF "err_log='''" "$lsul"
 
     # rc is a unix socket in the state dir, and the wrapper clears a stale one
     # before rclone tries to bind over it.

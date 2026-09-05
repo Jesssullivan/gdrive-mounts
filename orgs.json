@@ -20,6 +20,7 @@
     "pollInterval": "5m",
     "logLevel": "INFO",
     "statsInterval": "0",
+    "logMaxBytes": 8388608,
     "nfsMountOptions": ["soft", "intr", "timeo=600", "retrans=10", "dumbtimer"],
     "remoteControl": true,
     "watchdogEnable": true,

@@ -162,6 +162,27 @@ by hand when they get large; never let a cleanup delete a capture you have not
 read. The mount unit's `.err.log` and the wedge record are the exception: both
 are size-capped at start (see "Log hygiene").
 
+### Log hygiene
+
+launchd rotates nothing, and two files here are appended to without bound: the
+mount unit's own `.err.log` and the per-mount wedge record. On neo the
+`.err.log` reached **13.6 MB across 208,067 lines**, almost all of it goroutine
+dumps the watchdog itself induced.
+
+The mount wrapper caps both at start — once per unit start, never on a timer —
+above `orgs.json` `defaults.logMaxBytes` (8 MiB), keeping **two** generations
+at `<file>.1` and `<file>.2`.
+
+It is a **copy-truncate**, not a rename. launchd opens `StandardErrorPath`
+`O_APPEND` before it execs the wrapper, so the running process already holds an
+fd on that inode: renaming would send every later line to the renamed copy and
+no new `.err.log` would appear until the next start. Truncating in place is
+correct because the fd is `O_APPEND` — writes always land at the end.
+
+The wedge **captures** (`<stateDir>/wedge-capture.<org>-<mount>.log`) are
+deliberately not capped. They are the pre-restart evidence, they are small, and
+losing one to a size limit is the outcome the watchdog exists to prevent.
+
 ### Turning it off
 
 ```nix

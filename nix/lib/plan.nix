@@ -54,6 +54,7 @@ let
       pollInterval = defaults.pollInterval;
       logLevel = defaults.logLevel;
       statsInterval = defaults.statsInterval;
+      logMaxBytes = defaults.logMaxBytes;
       nfsMountOptions = defaults.nfsMountOptions;
       remoteControl = defaults.remoteControl;
       watchdogEnable = defaults.watchdogEnable;
@@ -318,10 +319,46 @@ let
       gdm_dev_of() { stat -c %d -- "$1" 2>/dev/null; }
       # Mode and ownership, so a permission failure names what to fix.
       gdm_perm_of() { stat -c '%A %U:%G' -- "$1" 2>/dev/null || printf 'mode unreadable'; }
+      gdm_size_of() { stat -c %s -- "$1" 2>/dev/null; }
     else
       gdm_dev_of() { stat -f %d -- "$1" 2>/dev/null; }
       gdm_perm_of() { stat -f '%Sp %Su:%Sg' -- "$1" 2>/dev/null || printf 'mode unreadable'; }
+      gdm_size_of() { stat -f %z -- "$1" 2>/dev/null; }
     fi
+
+    # Size-cap a file this system appends to forever, keeping $3 generations.
+    # Called at start, so the cost is one copy per unit start and never a timer.
+    #
+    # COPY-TRUNCATE, not rename. launchd opens `StandardErrorPath` before it
+    # execs the wrapper, so this process's fd 2 already points at that inode:
+    # renaming the file would send every subsequent line to the renamed copy
+    # and no new .err.log would appear until the next start. Truncating in
+    # place is correct instead, because launchd opens it `O_APPEND` — writes
+    # always land at the end, whatever the offset was.
+    #
+    # `cp -p` so the copy keeps the original's mode: the wedge record is 0600
+    # and names pids and paths, and a generation of it must not become 0644.
+    #
+    # Fails soft everywhere. A log that could not be capped is not a reason to
+    # refuse to mount a filesystem.
+    gdm_cap_file() { # path max_bytes [generations]
+      local f="$1" max="$2" keep="''${3:-2}" size i
+      [ -n "$f" ] || return 0
+      [ -f "$f" ] || return 0
+      size="$(gdm_size_of "$f")"
+      case "''${size:-}" in
+        "" | *[!0-9]*) return 0 ;;
+      esac
+      [ "$size" -gt "$max" ] || return 0
+      i="$keep"
+      while [ "$i" -gt 1 ]; do
+        [ -e "$f.$((i - 1))" ] && mv -f -- "$f.$((i - 1))" "$f.$i"
+        i=$((i - 1))
+      done
+      cp -pf -- "$f" "$f.1" 2>/dev/null || return 0
+      : > "$f" 2>/dev/null || return 0
+      gdm_log "log: capped $f at ''${size}B (over ''${max}B; the previous generation is $f.1)"
+    }
 
     # Is a real filesystem mounted here? Fails closed: an unreadable probe is
     # "not a mountpoint", never "yes" — the cache must not land on the boot

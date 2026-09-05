@@ -59,6 +59,7 @@ let
       pollInterval
       logLevel
       statsInterval
+      logMaxBytes
       nfsMountOptions
       ;
     indexStateDir = cfg.index.stateDir;
@@ -196,6 +197,11 @@ let
       volume=${escapeShellArg cacheVolume}
       sock=${escapeShellArg u.sock}
       err="$state/last-error.${u.org.name}-${u.mount.name}"
+      # The two files this system appends to without bound. Empty `err_log` on
+      # Linux, where stderr goes to the journal and systemd already caps it.
+      err_log=${escapeShellArg (if cfg.platform == "darwin" then "${logDir}/gdrive-mounts.${u.org.name}-${u.mount.name}.err.log" else "")}
+      wedge_record=${escapeShellArg u.watchdog.record}
+      log_max_bytes=${toString settings.logMaxBytes}
 
       ${plan.shellPreamble}
       ${plan.cacheGuard {
@@ -206,6 +212,15 @@ let
 
       mkdir -p "$state"
       chmod 700 "$state" 2>/dev/null || true
+
+      # Cap the two unbounded appenders, here at start, because start is the
+      # only moment this system reliably gets and a log rotation timer is one
+      # more unit to supervise. launchd never rotates anything: neo's err.log
+      # reached 13.6 MB / 208,067 lines, almost all of it goroutine dumps the
+      # watchdog induced, and the wedge record grew unrotated by design. Two
+      # generations, so the evidence from the run before last still exists.
+      gdm_cap_file "$err_log" "$log_max_bytes" 2
+      gdm_cap_file "$wedge_record" "$log_max_bytes" 2
       ${lib.optionalString (!cfg.cache.requireMountpoint) ''mkdir -p "$volume" >/dev/null 2>&1 || true''}
 
       # Cache guard: bounded wait, then fail loud with exit 78. The cache never
@@ -485,6 +500,7 @@ let
       pollInterval
       logLevel
       statsInterval
+      logMaxBytes
       nfsMountOptions
       remoteControl
       watchdogEnable
@@ -804,6 +820,30 @@ in
       description = ''
         rclone --stats. `"0"` disables the periodic stats block. launchd never
         rotates a log, and the watchdog heartbeat already carries liveness.
+      '';
+    };
+
+    logMaxBytes = mkOption {
+      type = types.int;
+      default = fromRegistry.logMaxBytes;
+      defaultText = literalMD "`orgs.json` `defaults.logMaxBytes`";
+      description = ''
+        Size at which the mount wrapper caps the two files this system appends
+        to without bound — the unit's own `.err.log` and the per-mount wedge
+        record — keeping two generations. Checked once per unit start, never on
+        a timer: start is the one moment this system reliably gets, and a
+        rotation timer would be another unit to supervise.
+
+        launchd rotates nothing. neo's `.err.log` reached 13.6 MB across
+        208,067 lines, almost all of it goroutine dumps the watchdog itself
+        induced. The cap is copy-truncate rather than rename, because launchd
+        opens `StandardErrorPath` `O_APPEND` before it execs the wrapper: a
+        rename would send every later line to the renamed copy and no new
+        `.err.log` would appear until the next start.
+
+        The wedge *captures* are deliberately NOT capped. They are the
+        pre-restart evidence, they are small, and losing one to a size limit is
+        exactly the outcome the watchdog exists to prevent.
       '';
     };
 

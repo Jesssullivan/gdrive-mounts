@@ -31,6 +31,7 @@
         "pollInterval",
         "logLevel",
         "statsInterval",
+        "logMaxBytes",
         "nfsMountOptions",
         "remoteControl",
         "watchdogEnable",
@@ -103,6 +104,11 @@
           "type": "string",
           "pattern": "^[0-9]+(ns|us|ms|s|m|h)?$",
           "description": "rclone --stats. \"0\" disables the periodic stats block; launchd never rotates a log, and the watchdog heartbeat already carries liveness."
+        },
+        "logMaxBytes": {
+          "type": "integer",
+          "minimum": 65536,
+          "description": "Size at which the mount wrapper caps the two files this system appends to without bound — the unit's own .err.log and the per-mount wedge record — keeping two generations. Checked once per unit start, never on a timer. launchd rotates nothing: neo's err.log reached 13.6 MB / 208,067 lines, almost all of it goroutine dumps the watchdog itself induced. The cap is copy-truncate, not rename, because launchd holds an O_APPEND fd on the err.log from before the wrapper execs."
         },
         "nfsMountOptions": {
           "type": "array",
