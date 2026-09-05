@@ -84,7 +84,7 @@ mount | grep GDrive
   no `read-only`; until that switch the live line still carries it. The flag
   matters for `xoxd`/`lmux` when they enable, and for any future read-only
   org.)
-- The full NFS client option list (`soft,intr,timeo=100,retrans=5,dumbtimer`)
+- The full NFS client option list (`soft,intr,timeo=600,retrans=10,dumbtimer`)
   does **not** appear in `mount` output. `nfsstat -m | sed -n '/GDrive/,/^$/p'`
   shows the negotiated options. Note the runbook's standing caveat: the
   option-forwarding path is read from rclone 1.75.0 source and asserted by

@@ -59,6 +59,42 @@ Phases, in order: `start`, `guard`, `sweep`, `render`, `exec`. The argv on the
 
 ## The wedge, and the watchdog that clears it
 
+> **2026-09-05 — the restart loop, and what it actually was.** neo restarted
+> `sulliwood-root` **606 times** between 2026-08-22 and 2026-09-05, one every
+> 6-25 minutes for the last 14 hours of that window. The full diagnostic pass
+> is `~/git/finances/docs/agent-notes/2026-09-04-gdrive-neo-wedge-diagnosis.md`.
+> Four findings, all of which changed code here:
+>
+> 1. **rclone was not crashing.** 443 `SIGQUIT` blocks in the unit `.err.log`
+>    against **zero** SIGSEGV, SIGBUS, panic or fatal error in 208,067 lines.
+>    Every one was induced by the watchdog's own evidence capture. The
+>    watchdog now says so: `induced traceback (not a crash)`.
+> 2. **It was a latency wedge, not a fault.** A cold Drive root listing
+>    measured **12.766s**; the mount was built with `timeo=100`, which is
+>    **10s** on macOS. go-nfs answers one connection serially, so one slow
+>    `READDIRPLUS` stalled the whole conversation past the client's patience
+>    and macOS set `0x2,not responding`. Now `timeo=600` / `retrans=10`.
+> 3. **The `stat` probe was inert.** macOS answered it from the root attribute
+>    cache, so it reported `ok` through **345 of 377** flag-driven wedges — the
+>    OR of two signals had quietly become the kernel flag alone. Now a readdir,
+>    AND-combined.
+> 4. **The watchdog converted a self-clearing stall into a cold start.** 271
+>    recorded self-recoveries against those 606 restarts, and each restart
+>    discarded an in-process dir cache with no on-disk backing, guaranteeing
+>    the next cold walk inside the floor. Threshold 2 -> 5, floor 300s ->
+>    1800s, grace +180s -> +900s, and `--vfs-refresh` warms the tree at start.
+>
+> yoga never wedged, on the same rclone, the same remote and the same watchdog
+> logic: on Linux the module uses `rclone mount` (FUSE), and there is no RPC
+> timeout in that path at all.
+>
+> **Not proven, and worth knowing before you tune further:** whether the
+> `timeo` raise alone would have ended the loop (12.766s was one measurement of
+> one shallow listing on a loaded host — deeper directories may cost more than
+> 60s); what generated 526k READDIRPLUS and 1.44M ACCESS calls (Spotlight is
+> confirmed off for the mount); and why the index runs were failing (no
+> `rateLimitExceeded`, `429` or `quotaExceeded` line was found anywhere).
+
 A mount can stop serving while every process involved stays alive. Both
 observed forms were captured on neo on 2026-08-19 —
 `docs/evidence/2026-08-19-nfs-wedge.md` has the dumps:
@@ -79,24 +115,48 @@ Each cycle (60s by default) it:
 1. Stands down if the mount unit is not loaded — an operator who stopped a
    mount does not get it resurrected — or if nothing is mounted yet and the
    unit is younger than the grace window (the cache guard's own budget plus
-   three minutes; the guard alone may legitimately wait two minutes). The grace
+   fifteen minutes; the guard alone may legitimately wait two minutes, and a
+   cold `nfsmount` then has to walk the remote before it answers). The grace
    applies only until the watchdog has seen the point mounted once; after that
    a disappearance is unambiguous and is acted on immediately.
 2. Probes two ways: the kernel's `nfsstat -m` status flags, which answer even
-   while the mount does not, and a bounded `stat` run from an expendable child.
-   The child is *abandoned* rather than waited on — a `hard,nointr` caller
-   blocks in the kernel where no signal lands, so `timeout` cannot rescue it.
-3. Counts consecutive failures. It acts on the **second**, never the first: the
-   `not responding` flag is observed to set and clear on its own within a
-   minute, and a single-sample watchdog would restart the mount continuously.
-4. On confirmation: captures first — `nfsstat -m` plus `core/stats`,
+   while the mount does not, and a bounded **readdir** (`ls -1f`) run from an
+   expendable child. The child is *abandoned* rather than waited on — a
+   `hard,nointr` caller blocks in the kernel where no signal lands, so
+   `timeout` cannot rescue it.
+
+   It is a readdir and not a `stat` deliberately. macOS answers `stat` on a
+   mountpoint out of the root attribute cache (`acrootdirmin=5`), so the old
+   `stat` probe returned `ok` through **345 of 377** flag-driven wedges on neo
+   — the filesystem half of the verdict was inert. A readdir goes to the wire.
+3. Combines the two with **AND**, not OR: a flag on its own is logged and
+   waited out, and only a flag *plus* a genuinely failed filesystem call counts
+   as a failure. The `not responding` flag sets and clears by itself — 271
+   recorded self-recoveries on neo against 606 restarts — so treating it as a
+   verdict on its own is what built a restart loop. On Linux there is no kernel
+   signal to AND with and the filesystem call decides alone.
+4. Counts consecutive failures and acts on the **fifth**
+   (`watchdogFailureThreshold`), i.e. after five minutes of *sustained*
+   unhealth at the 60s interval. Two was not enough: the flag commonly clears
+   after three or four minutes.
+5. On confirmation: captures first — `nfsstat -m` plus `core/stats`,
    `core/pid`, `vfs/stats` over the rc unix socket, then `SIGQUIT`, which makes
    the Go runtime dump every goroutine to the unit's `.err.log`. SIGQUIT is a
    capture *and* a kill, so it only ever runs on the path that restarts anyway.
-5. Restarts the mount unit, and writes a wedge record.
-6. Will not restart the same mount again inside `watchdogRestartFloorSec`
-   (300s). A held wedge is still recorded — the floor suppresses the restart,
-   never the evidence.
+
+   **That dump is not a crash.** It opens `SIGQUIT: quit` followed by a full
+   register dump and reads exactly like a native fault; the watchdog induces
+   every one. neo's `.err.log` held 443 of them against zero `SIGSEGV`, zero
+   `SIGBUS`, zero `panic` and zero `fatal error` in 208,067 lines. The
+   watchdog log says so on the line above each one: `induced traceback (not a
+   crash)`.
+6. Restarts the mount unit, and writes a wedge record.
+7. Will not restart the same mount again inside `watchdogRestartFloorSec`
+   (1800s). A held wedge is still recorded — the floor suppresses the restart,
+   never the evidence. The floor is long because a restart `SIGKILL`s rclone
+   and throws away an **in-process** dir cache with no on-disk backing, so the
+   replacement re-walks Drive cold; a floor shorter than a cold start simply
+   re-arms the loop.
 
 ### Reading a wedge record
 
@@ -116,7 +176,12 @@ $ jq -c . ~/.local/state/gdrive-mounts/wedge.sulliwood-root.jsonl | tail -3
 | `restart_count` | cumulative restarts for this mount, derived from the file itself |
 | `uptime_sec` | how long the mount survived this time — the recurrence metric |
 | `nfs_status_flags` | `0x2,not responding` = the kernel gave up; `none` on Linux |
-| `probe` | `timeout` (a call never returned), `error`, or `unmounted` (nothing was mounted at all — the quiet class) |
+| `probe` | the readdir result: `timeout` (a call never returned), `error`, or `unmounted` (nothing was mounted at all — the quiet class) |
+
+A record with `"nfs_status_flags":"0x2,not responding"` and `"probe":"ok"` is
+the signature of the pre-2026-09-05 watchdog, whose `stat` probe was answered
+from the attribute cache. It cannot be produced any more: the readdir probe and
+the AND rule mean a restart requires both signals to have failed.
 
 A rising `restart_count` with a *falling* `uptime_sec` means the mount is
 degrading, not merely flapping. Escalate on that, not on a single record.
@@ -127,10 +192,32 @@ a heartbeat hourly, every unhealthy cycle, and every decision. Captures land in
 `<stateDir>/wedge-capture.<org>-<mount>.log`, and the goroutine dump in the
 mount unit's own `.err.log`.
 
-**Neither file is ever rotated or truncated by this repo, deliberately** —
+**The captures are never rotated or truncated by this repo, deliberately** —
 launchd appends, and the pre-restart evidence is the whole point. Rotate them
 by hand when they get large; never let a cleanup delete a capture you have not
-read.
+read. The mount unit's `.err.log` and the wedge record are the exception: both
+are size-capped at start (see "Log hygiene").
+
+### Log hygiene
+
+launchd rotates nothing, and two files here are appended to without bound: the
+mount unit's own `.err.log` and the per-mount wedge record. On neo the
+`.err.log` reached **13.6 MB across 208,067 lines**, almost all of it goroutine
+dumps the watchdog itself induced.
+
+The mount wrapper caps both at start — once per unit start, never on a timer —
+above `orgs.json` `defaults.logMaxBytes` (8 MiB), keeping **two** generations
+at `<file>.1` and `<file>.2`.
+
+It is a **copy-truncate**, not a rename. launchd opens `StandardErrorPath`
+`O_APPEND` before it execs the wrapper, so the running process already holds an
+fd on that inode: renaming would send every later line to the renamed copy and
+no new `.err.log` would appear until the next start. Truncating in place is
+correct because the fd is `O_APPEND` — writes always land at the end.
+
+The wedge **captures** (`<stateDir>/wedge-capture.<org>-<mount>.log`) are
+deliberately not capped. They are the pre-restart evidence, they are small, and
+losing one to a size limit is the outcome the watchdog exists to prevent.
 
 ### Turning it off
 
@@ -226,8 +313,8 @@ client. `defaults.nfsMountOptions` is that list:
 |---|---|
 | `soft` | a stalled call fails with `EIO` after `retrans` intervals instead of blocking forever — recoverable, and *visible* to the watchdog |
 | `intr` | its caller can be interrupted, so a wedged `ls` can be killed |
-| `timeo=100` | **tenths of a second** on macOS, so 10s — the stock default is 1s |
-| `retrans=5` | retransmits before a soft mount gives up |
+| `timeo=600` | **tenths of a second** on macOS, so 60s per RPC try — the stock default is 1s. Raised from `timeo=100` (10s) on 2026-09-05: a cold Drive root listing measured **12.766s**, so the client was giving up before a single cold `READDIRPLUS` could ever return |
+| `retrans=10` | retransmits before a soft mount gives up — ~10 minutes of patience at `timeo=600`, after which `soft` still returns `EIO` rather than blocking |
 | `dumbtimer` | use `timeo` literally. Without it the client derives its timeout from the observed round trip, and on a *loopback* server that estimate is microseconds — which is the real reason the stock mount gives up so fast on a Drive-backed call |
 
 `soft` is refused on a read-write mount unless
@@ -271,7 +358,7 @@ whether macOS `mount(8)` honours every one of them in this position is an
 empirical question. Confirm on the first deploy, and record it:
 
 ```console
-# read-only org: expect soft,intr,timeo=100,retrans=5,dumbtimer AND read-only
+# read-only org: expect soft,intr,timeo=600,retrans=10,dumbtimer AND read-only
 nfsstat -m | sed -n '/GDrive/,/^$/p'
 # the same fact from the kernel's own mount table
 mount | grep GDrive                      # expect "(nfs, read-only, ...)"
@@ -353,6 +440,31 @@ sqlite3 <indexStateDir>/index.sqlite \
 Freshness SLO: `orgs.json` `defaults.indexFreshnessSloHours` (24h at time of
 writing). Raw per-org JSON at `<indexStateDir>/<org>.json`.
 
+### When an index run fails
+
+`<indexStateDir>/<org>.err` is the current run's stderr; `<org>.err.1`,
+`.err.2`, `.err.3` are the three runs before it, newest first. Read `.err.1`
+after a failure — the current file belongs to whatever ran next.
+
+Before 2026-09-05 there was no rotation and every start truncated the file, so
+the reason a run failed was gone by the time anyone looked. `just doctor` could
+say a run had failed and nothing on the host could say why.
+
+`index.intervalSec` is a fixed *period* (launchd `StartInterval`, systemd
+`OnUnitActiveSec`), not a gap between runs, and a full-tree
+`lsjson -R --fast-list` measured 4h40m to 8h44m on neo against a 6h interval —
+so the schedule overlapped itself. A start that finds a live run now stands
+down with
+
+```
+gdrive-index: an index run is already in flight (pid NNNN); standing down for this interval
+```
+
+and exits 0, because behaving correctly must not be recorded as a unit
+failure. The lock is `<indexStateDir>/index.lock/` (a directory: `mkdir` is
+atomic) holding the owner's pid; a lock whose pid is gone is cleared with a
+warning on the next start.
+
 ## Common failures
 
 | Symptom | Likely cause | Fix |
@@ -370,6 +482,7 @@ writing). Raw per-org JSON at `<indexStateDir>/<org>.json`.
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |
 | an app reports "you don't have permission" once **per file** when writing to a read-only mount, instead of naming the volume | `rdonly` did not reach the kernel, so the VFS refusal arrives as `NFS3ERR_ACCES` and every read-only signal (`MNT_RDONLY`, `statvfs` `ST_RDONLY`, `access(W_OK)`) disagrees with it | `mount \| grep GDrive` must say `read-only`. If it does not, the option was rejected or the unit predates it — kickstart the agent, then see "Mount semantics" |
 | a write looks accepted but silently vanishes, or the mount is still read-only after promotion | `orgs.json` `scope` was flipped but the token was never re-minted | scope lives in the token, not the config file — re-run `just mint-token <org>` after any scope change; see `docs/sops-integration.md` |
+| `doctor` reports `secrets … WARN mode 755 (want 600)` | **fixed 2026-09-05; if you still see it, the host is on an old generation.** The secret paths are symlinks placed by sops-nix into its own 0700 store, and `file_mode` was reading the *link's* mode, not the file's. Neither GNU nor BSD `stat` dereferences by default — measured, both print `755` for a symlink to a `400` file — so the check had never once looked at a real secret. `stat -L` on both branches |
 | `render-config` warns "missing unreadable secret" for one org and no other org is affected | that org's secret isn't seeded in `lab`, or it's enabled in `orgs.json` but never wired into the lab wrapper | seed it (`docs/adoption.md`), wire `secrets.<org>` in the wrapper, re-switch — an unwired org must degrade alone, never take down another org's mount |
 | one agent shows a single failed-then-recovered launch in the first ~30s after a fresh switch | sops secret decryption hadn't finished before the agent's first launch attempt | self-heals; only worth investigating if it recurs past that first launch |
 

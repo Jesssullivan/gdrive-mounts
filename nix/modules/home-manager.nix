@@ -59,6 +59,7 @@ let
       pollInterval
       logLevel
       statsInterval
+      logMaxBytes
       nfsMountOptions
       ;
     indexStateDir = cfg.index.stateDir;
@@ -196,6 +197,11 @@ let
       volume=${escapeShellArg cacheVolume}
       sock=${escapeShellArg u.sock}
       err="$state/last-error.${u.org.name}-${u.mount.name}"
+      # The two files this system appends to without bound. Empty `err_log` on
+      # Linux, where stderr goes to the journal and systemd already caps it.
+      err_log=${escapeShellArg (if cfg.platform == "darwin" then "${logDir}/gdrive-mounts.${u.org.name}-${u.mount.name}.err.log" else "")}
+      wedge_record=${escapeShellArg u.watchdog.record}
+      log_max_bytes=${toString settings.logMaxBytes}
 
       ${plan.shellPreamble}
       ${plan.cacheGuard {
@@ -206,6 +212,15 @@ let
 
       mkdir -p "$state"
       chmod 700 "$state" 2>/dev/null || true
+
+      # Cap the two unbounded appenders, here at start, because start is the
+      # only moment this system reliably gets and a log rotation timer is one
+      # more unit to supervise. launchd never rotates anything: neo's err.log
+      # reached 13.6 MB / 208,067 lines, almost all of it goroutine dumps the
+      # watchdog induced, and the wedge record grew unrotated by design. Two
+      # generations, so the evidence from the run before last still exists.
+      gdm_cap_file "$err_log" "$log_max_bytes" 2
+      gdm_cap_file "$wedge_record" "$log_max_bytes" 2
       ${lib.optionalString (!cfg.cache.requireMountpoint) ''mkdir -p "$volume" >/dev/null 2>&1 || true''}
 
       # Cache guard: bounded wait, then fail loud with exit 78. The cache never
@@ -290,7 +305,14 @@ let
         # Derived, never a knob of its own: it must never be shorter than the
         # cache guard's own budget, or the watchdog would restart a mount that
         # is legitimately still waiting for its volume.
-        mountGraceSec = cfg.cache.waitSeconds + 180;
+        #
+        # +900, not +180, since 2026-09-05. A cold `nfsmount` has to clear the
+        # sweep, sit through the cache guard, and then walk the remote before it
+        # answers; on a large Drive that is minutes, not seconds. With the old
+        # 300s budget neo restarted instances that had never finished coming up
+        # — 03:18:13 started pid 9635, 03:19:20 started pid 9830, 67 seconds
+        # apart — which is a loop, not supervision.
+        mountGraceSec = cfg.cache.waitSeconds + 900;
         nfsStatus = cfg.platform == "darwin" && backend == "nfsmount";
         mountedCheck = isMountedNonBlocking u.point;
         unitActiveCheck = unitActiveCheck u;
@@ -478,6 +500,7 @@ let
       pollInterval
       logLevel
       statsInterval
+      logMaxBytes
       nfsMountOptions
       remoteControl
       watchdogEnable
@@ -527,6 +550,21 @@ let
       $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
       $DRY_RUN_CMD install -m 600 ${effectiveSettingsFile} ${escapeShellArg "${effectiveSettingsPath}.new"}
       $DRY_RUN_CMD mv -f ${escapeShellArg "${effectiveSettingsPath}.new"} ${escapeShellArg effectiveSettingsPath}
+
+      # Every directory this module owns is 0700 (scripts/lib/common.sh, top).
+      # The secrets subtree is the one place that drifts: sops-nix creates the
+      # parents of the symlinks it places with a bare `mkdir -p`, which is
+      # 0755, and it exposes no per-secret parent-mode knob. Nothing actually
+      # leaks — the leaves are symlinks into sops-nix's own 0700 store — but a
+      # contract with a standing exception is not a contract, and `doctor`
+      # should not have to explain it.
+      #
+      # `-type d` is load-bearing: it matches directories by lstat, so a
+      # symlinked secret is never a candidate. `chmod` follows symlinks, and
+      # chmod-ing one of these leaves would rewrite the mode of a file inside
+      # sops-nix's store, which this module does not own and must not touch.
+      # Scoped to stateDir for the same reason.
+      $DRY_RUN_CMD find ${escapeShellArg "${settings.stateDir}/secrets"} -type d -exec chmod 700 {} + 2>/dev/null || true
     )
   '';
 
@@ -785,11 +823,35 @@ in
       '';
     };
 
+    logMaxBytes = mkOption {
+      type = types.int;
+      default = fromRegistry.logMaxBytes;
+      defaultText = literalMD "`orgs.json` `defaults.logMaxBytes`";
+      description = ''
+        Size at which the mount wrapper caps the two files this system appends
+        to without bound — the unit's own `.err.log` and the per-mount wedge
+        record — keeping two generations. Checked once per unit start, never on
+        a timer: start is the one moment this system reliably gets, and a
+        rotation timer would be another unit to supervise.
+
+        launchd rotates nothing. neo's `.err.log` reached 13.6 MB across
+        208,067 lines, almost all of it goroutine dumps the watchdog itself
+        induced. The cap is copy-truncate rather than rename, because launchd
+        opens `StandardErrorPath` `O_APPEND` before it execs the wrapper: a
+        rename would send every later line to the renamed copy and no new
+        `.err.log` would appear until the next start.
+
+        The wedge *captures* are deliberately NOT capped. They are the
+        pre-restart evidence, they are small, and losing one to a size limit is
+        exactly the outcome the watchdog exists to prevent.
+      '';
+    };
+
     nfsMountOptions = mkOption {
       type = types.listOf types.str;
       default = fromRegistry.nfsMountOptions;
       defaultText = literalMD "`orgs.json` `defaults.nfsMountOptions`";
-      example = literalExpression ''[ "intr" "timeo=100" "retrans=5" "dumbtimer" ]'';
+      example = literalExpression ''[ "intr" "timeo=600" "retrans=10" "dumbtimer" ]'';
       description = ''
         NFS client mount options, emitted one per `--option`. Emitted only when
         the backend is `nfsmount`; on `rclone mount` the same flag means libfuse
@@ -806,10 +868,19 @@ in
         `soft`+`intr` make a stalled call fail with `EIO` and make its caller
         killable, instead of blocking forever in the kernel where no signal is
         delivered — the state that made the 2026-08-19 wedge bistable and left
-        the watchdog unable even to probe it. `timeo` is in **tenths of a
-        second** on macOS, so `timeo=100` is 10s, and `dumbtimer` keeps the
-        dynamic retransmit estimator from deriving a microsecond timeout from
-        the loopback round-trip.
+        the watchdog unable even to probe it.
+
+        `timeo` is in **tenths of a second** on macOS, so `timeo=600` is 60s
+        per RPC try and `retrans=10` is roughly ten minutes before a `soft`
+        mount gives up with `EIO`. That budget is measured, not chosen: a cold
+        Drive root listing through the rendered config took **12.766s** on neo
+        (2026-09-05), go-nfs answers one connection serially, and the former
+        `timeo=100` (10s) was therefore *shorter than a single cold
+        READDIRPLUS* — the client gave up on the very first try, retransmitted
+        into a handler still inside the same Drive call, and macOS set
+        `0x2,not responding`. `dumbtimer` keeps the dynamic retransmit
+        estimator from deriving a microsecond timeout from the loopback
+        round-trip.
 
         `soft` can surface a stalled write as an I/O error, so it is refused on
         a read-write org (see the assertion). Confirm any change actually landed
@@ -886,6 +957,15 @@ in
           Consecutive failed probes before the watchdog acts. Never 1: the
           macOS "not responding" flag is observed to set and clear on its own
           within a single minute.
+
+          2 was not enough either. At `intervalSec = 60` it acts after about
+          two minutes, and the flag commonly clears after three or four: neo
+          logged 271 self-recoveries against 606 restarts between 2026-08-22
+          and 2026-09-05, so the watchdog was restarting through roughly
+          two-thirds of a population of stalls that resolve on their own — and
+          each restart discards rclone's in-process dir cache and guarantees
+          the next cold walk. The default is now 5, i.e. five minutes of
+          *sustained* unhealth.
         '';
       };
       restartFloorSec = mkOption {
@@ -896,6 +976,13 @@ in
           Minimum seconds between watchdog restarts of one mount. Held wedges
           are still written to the wedge record, so the floor suppresses the
           restart, never the evidence.
+
+          The floor has to outlast a cold start, not merely a probe cycle.
+          `--dir-cache-time` is a TTL on an *in-process* cache with no on-disk
+          backing, so `launchctl kickstart -k` throws the warm tree away and
+          the replacement re-walks Drive from cold. Restart uptimes on neo
+          clustered at 380-1600s under the old 300s floor — the loop re-armed
+          before any instance reached steady state. The default is now 1800.
         '';
       };
     };
@@ -951,7 +1038,17 @@ in
       intervalSec = mkOption {
         type = types.int;
         default = 21600;
-        description = "Seconds between index refreshes.";
+        description = ''
+          Seconds between index refreshes.
+
+          A fixed *period* — launchd `StartInterval`, systemd
+          `OnUnitActiveSec` — not a gap between runs, so it can be shorter
+          than a run. A full-tree `lsjson -R --fast-list` measured 4h40m to
+          8h44m on neo against this 6h default. The index script holds a lock
+          and stands down when a run is already in flight, so an overlap costs
+          a skipped interval rather than two walks over one Drive and one
+          sqlite file.
+        '';
       };
       stateDir = mkOption {
         type = types.str;
@@ -996,7 +1093,7 @@ in
 
               # keep hard semantics everywhere (safe, but a stall stays permanent)
               programs.gdrive-mounts.nfsMountOptions =
-                [ "intr" "timeo=100" "retrans=5" "dumbtimer" ];
+                [ "intr" "timeo=600" "retrans=10" "dumbtimer" ];
 
             or, having considered the write path, accept the trade explicitly:
 

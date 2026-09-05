@@ -57,6 +57,7 @@ here), prompt-toon (agent-output shaping conventions).
 | Secrets scan | `just secrets-scan-dir` |
 | Endpoint-free doctrine | `just endpoint-free-check` |
 | Flake checks | `just flake-check` |
+| Shell library unit tests | `just test-lib` |
 | Home-manager module eval | `just hm-eval` |
 | Bazel candidate graph | `just bazel-test` |
 | Manifest conformance | `just repo-manifest-validate` |

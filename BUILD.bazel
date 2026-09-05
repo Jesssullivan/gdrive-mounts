@@ -70,6 +70,22 @@ sh_test(
     ],
 )
 
+# The shell library's own unit tests. nix/tests/hm-eval.nix covers the nix
+# side and reaches none of scripts/lib/common.sh, which is how `file_mode`
+# went months reporting a symlink's mode instead of the file's.
+sh_test(
+    name = "lib_test",
+    srcs = ["scripts/test-lib.sh"],
+    data = [
+        ":config_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
+)
+
 sh_test(
     name = "secrets_scan_test",
     srcs = ["scripts/secrets-scan-dir.sh"],

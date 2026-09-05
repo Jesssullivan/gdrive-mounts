@@ -356,6 +356,12 @@ let
       restartFloorSec ? 300,
       probeTimeoutSec ? 2,
       mountGraceSec ? 300,
+      # The kernel-side signal. `false` is the Linux shape (the filesystem call
+      # decides alone); `true` is the Darwin+nfsmount shape, where the flag has
+      # to AGREE before a failed filesystem call counts. On any builder the
+      # harness point is not an NFS mount, so the flag reads empty/healthy —
+      # which is exactly the condition the AND arm exists to sit out.
+      nfsStatus ? false,
     }:
     pkgs.writeShellScript "gdrive-mounts-watchdog-harness" ''
       set -euo pipefail
@@ -379,7 +385,7 @@ let
           restartFloorSec
           mountGraceSec
           ;
-        nfsStatus = false;
+        inherit nfsStatus;
         mountedCheck = ''[ -f "$state/mounted" ]'';
         unitActiveCheck = ''[ -f "$state/active" ]'';
         unitPidCommand = ''cat "$state/pid" 2>/dev/null || true'';
@@ -643,6 +649,22 @@ let
         && settingsEntry.after == [ "writeBoundary" ];
     }
     {
+      # sops-nix creates the parents of the symlinks it places with a bare
+      # `mkdir -p` (0755) and has no per-secret parent-mode knob, so the
+      # module normalises them where it already owns activation. Scoped to
+      # stateDir, and `-type d` only: chmod follows symlinks, and the secret
+      # leaves point into sops-nix's own store, which this module must not
+      # touch.
+      name = "activation-normalises-only-the-secret-dirs-it-owns";
+      ok =
+        hasInfix "-type d -exec chmod 700" settingsEntry.data
+        && hasInfix "${homeDir}/.local/state/gdrive-mounts/secrets" settingsEntry.data
+        # ...and it never reaches into sops-nix's own store, which this module
+        # does not own. (The prose in the emitted comment names sops-nix; the
+        # assertion is on the path, which is the thing that would do harm.)
+        && !(hasInfix ".config/sops-nix" settingsEntry.data);
+    }
+    {
       name = "activation-writes-effective-settings";
       ok =
         darwinCfg.home.activation ? gdriveMountsSettings
@@ -861,12 +883,17 @@ let
       # estimator would otherwise derive a microsecond timeout from a loopback
       # RTT — which is why the stock mount gives up after ~1s on a Drive call
       # that rclone thinks is fine. Assert the ratified set on the real registry.
+      #
+      # Re-ratified 2026-09-05: timeo=600 (60s), retrans=10. A cold Drive root
+      # listing measured 12.766s on neo, so the previous timeo=100 (10s) was
+      # below the cost of a single cold READDIRPLUS and the client gave up on
+      # its first try, every time the mount started cold.
       name = "production-nfs-mount-options-are-the-ratified-ones";
       ok =
         let
           o = prodData.defaults.nfsMountOptions;
         in
-        elem "soft" o && elem "intr" o && elem "timeo=100" o && elem "retrans=5" o && elem "dumbtimer" o;
+        elem "soft" o && elem "intr" o && elem "timeo=600" o && elem "retrans=10" o && elem "dumbtimer" o;
     }
     # ── the read-only mount lies to the kernel (neo, 2026-08-21) ───────────────
     {
@@ -1017,8 +1044,114 @@ let
         let
           w = watchdogTextFor true;
         in
-        hasInfix ''gdm_probe_stat_result="unmounted"'' w
+        hasInfix ''gdm_probe_fs_result="unmounted"'' w
         && hasInfix ''[ "''${up:-0}" -lt "$mount_grace" ]'' w;
+    }
+    {
+      # The probe has to hit the wire. macOS answers `stat "$point/."` out of
+      # the root attribute cache (acrootdirmin=5), and on neo that returned `ok`
+      # through 345 of 377 flag-driven wedges — which silently reduced a verdict
+      # designed to need two independent signals to the kernel flag alone. A
+      # readdir cannot be served from that cache. `-f` keeps it to one readdir
+      # with no per-entry GETATTR storm against a mount that is already sick.
+      name = "the-filesystem-probe-is-a-readdir-not-a-stat";
+      ok =
+        let
+          w = watchdogTextFor true;
+        in
+        hasInfix ''ls -1f -- "$point" >/dev/null 2>&1 || rc=$?'' w
+        && !(hasInfix ''stat -- "$point/."'' w);
+    }
+    {
+      # AND, not OR, wherever there are two signals to combine. The flag sets
+      # and clears on its own (271 self-recoveries against 606 restarts on neo,
+      # 2026-08-22..09-05), so a flag with a working filesystem call is a
+      # transient to be waited out, not a wedge to be restarted through.
+      name = "the-two-signals-are-and-combined-on-darwin";
+      ok =
+        let
+          w = watchdogTextFor true;
+        in
+        hasInfix "waiting it out, not counting a failure" w
+        # A healthy filesystem call ends the verdict on its own, before the
+        # flag is ever consulted...
+        && hasInfix ''if [ "$gdm_probe_fs_result" = ok ]'' w
+        # ...and the old OR — "any flag at all is a failure" — is gone.
+        && !(hasInfix ''"" | 0x0) ;;'' w);
+    }
+    {
+      # ...and the AND arm must NOT be emitted on Linux, where `gdm_nfs_status`
+      # is `true` and the flags are always empty: emitting it there would make
+      # every probe pass and disable the watchdog outright.
+      name = "the-and-arm-is-absent-where-there-is-no-kernel-signal";
+      ok =
+        let
+          w = watchdogTextFor false;
+        in
+        !(hasInfix "waiting it out, not counting a failure" w)
+        && hasInfix ''if [ "$gdm_probe_fs_result" = ok ]'' w;
+    }
+    {
+      # The SIGQUIT block in the unit err log opens `SIGQUIT: quit` and a full
+      # register dump, which reads exactly like a native crash — and was read as
+      # one. 443 of them on neo against zero SIGSEGV, SIGBUS, panic or fatal
+      # error in 208,067 lines. The watchdog induces every one, so the watchdog
+      # is where it has to be labelled.
+      name = "the-induced-traceback-is-labelled-as-such";
+      ok =
+        let
+          w = watchdogTextFor true;
+        in
+        hasInfix "induced traceback (not a crash)" w
+        && hasInfix "INDUCED BY THIS WATCHDOG (not a crash)" w
+        && hasInfix "kill -QUIT" w;
+    }
+    {
+      # The ratified supervision constants, asserted on the registry an operator
+      # actually edits. The threshold has to exceed the observed self-clear time
+      # and the floor has to outlast a cold start, or the watchdog converts a
+      # self-clearing stall into a restart loop — which is what it did.
+      name = "production-watchdog-constants-outlast-a-self-clearing-stall";
+      ok =
+        let
+          d = prodData.defaults;
+        in
+        d.watchdogIntervalSec == 60
+        && d.watchdogFailureThreshold == 5
+        && d.watchdogRestartFloorSec == 1800
+        # Five minutes of sustained unhealth before acting: longer than the
+        # 3-4 minute self-clear observed on neo.
+        && d.watchdogIntervalSec * d.watchdogFailureThreshold >= 300
+        # And a floor that cannot re-arm inside one cold start.
+        && d.watchdogRestartFloorSec >= 2 * (d.watchdogIntervalSec * d.watchdogFailureThreshold);
+    }
+    {
+      # A cold start has to re-walk Drive because the dir cache is in-process
+      # with no on-disk backing. Refresh it in the background so the first NFS
+      # readdir is not the 12.7s one. nfsmount-gated: FUSE has no RPC timeout
+      # racing the walk.
+      name = "vfs-refresh-warms-the-tree-on-nfsmount-only";
+      ok =
+        elem "--vfs-refresh" (argsOf "darwin" "sulliwood")
+        && !(elem "--vfs-refresh" (argsOf "linux" "sulliwood"));
+    }
+    {
+      # launchd rotates nothing, and the two files this system appends to
+      # without bound are the unit's own .err.log (13.6 MB / 208,067 lines on
+      # neo, almost all of it watchdog-induced goroutine dumps) and the wedge
+      # record. Copy-truncate, never rename: launchd holds an O_APPEND fd on
+      # the .err.log from before the wrapper execs, so a rename would send
+      # every later line to the renamed copy.
+      name = "the-log-cap-is-copy-truncate-and-keeps-a-generation";
+      ok =
+        let
+          p = plan.shellPreamble;
+        in
+        hasInfix ''cp -pf -- "$f" "$f.1"'' p
+        && hasInfix '': > "$f"'' p
+        && !(hasInfix ''mv -f -- "$f" "$f.1"'' p)
+        && hasInfix "stat -c %s" p
+        && hasInfix "stat -f %z" p;
     }
     {
       name = "the-restart-floor-is-read-from-disk-not-from-a-variable";
@@ -1072,6 +1205,13 @@ else
     grep -q -- '--nfs-cache-handle-limit' "$dsul"
     no grep -q -- '--nfs-cache-handle-limit' "$lsul"
 
+    # ...and so does the background tree refresh. The dir cache is in-process
+    # with no on-disk backing, so every start begins cold; warming it in the
+    # background keeps the 12.7s walk off the first user readdir. FUSE has no
+    # RPC timeout racing that walk, so it is nfsmount-gated like the rest.
+    grep -q -- '--vfs-refresh' "$dsul"
+    no grep -q -- '--vfs-refresh' "$lsul"
+
     # H3 — NFS client mount options reach mount(8), and only on nfsmount. On
     # `rclone mount` the same flag means libfuse options, which these are not.
     #
@@ -1079,7 +1219,7 @@ else
     # what needs it: `soft` passes through bare, `timeo=100` comes out
     # single-quoted because of the `=`. Asserting the bare form only would have
     # passed for three of the five and quietly missed the other two.
-    for o in soft intr timeo=100 retrans=5 dumbtimer; do
+    for o in soft intr timeo=600 retrans=10 dumbtimer; do
       grep -qE -- "--option '?$o'?" "$dsul"
     done
     no grep -q -- '--option' "$lsul"
@@ -1149,6 +1289,13 @@ else
     grep -q 'effective-settings.json' "$settings"
     grep -q -- '-m 600' "$settings"
 
+    # ...and normalises the secret directories it owns to 0700, by lstat
+    # (`-type d`) so a symlinked secret leaf is never chmod-ed through into
+    # sops-nix's own store.
+    grep -qF -- '-type d -exec chmod 700' "$settings"
+    grep -qF '.local/state/gdrive-mounts/secrets' "$settings"
+    no grep -qF '.config/sops-nix' "$settings"
+
     # That record is non-secret by construction: paths and knobs, no secrets.
     doc="$(grep -o '/nix/store/[^ ]*-gdrive-mounts-effective-settings.json' "$settings" | head -1)"
     grep -q '"cacheRoot"' "$doc"
@@ -1171,6 +1318,17 @@ else
       grep -q -- '--log-level INFO' "$f"
       grep -q -- '--stats 0' "$f"
     done
+
+    # The wrapper caps the two unbounded appenders at start, keeping two
+    # generations. On Linux stderr goes to the journal, so only the wedge
+    # record has a path to cap.
+    grep -qF 'gdm_cap_file "$err_log" "$log_max_bytes" 2' "$dsul"
+    grep -qF 'gdm_cap_file "$wedge_record" "$log_max_bytes" 2' "$dsul"
+    grep -qF 'gdrive-mounts.sulliwood-root.err.log' "$dsul"
+    grep -qF 'wedge.sulliwood-root.jsonl' "$dsul"
+    grep -qF 'log_max_bytes=${toString testSettings.logMaxBytes}' "$dsul"
+    # …and the Linux wrapper names no log file, because there is none to name.
+    grep -qF "err_log='''" "$lsul"
 
     # rc is a unix socket in the state dir, and the wrapper clears a stale one
     # before rclone tries to bind over it.
@@ -1198,8 +1356,30 @@ else
     grep -q 'systemctl --user is-active' "$lwatch"
     grep -q 'standing down' "$dwatch"
 
-    # It captures before it acts, and SIGQUIT is on the capture path only.
+    # The filesystem probe is a readdir, on both platforms: macOS serves `stat`
+    # on a mountpoint from the root attribute cache, so the old probe reported
+    # `ok` through 345 recorded wedges and the OR below collapsed to the kernel
+    # flag alone.
+    for f in "$dwatch" "$lwatch"; do
+      grep -qF 'ls -1f -- "$point"' "$f"
+      no grep -qF 'stat -- "$point/."' "$f"
+    done
+
+    # Two signals, AND-combined — but only where there are two. On Linux
+    # `gdm_nfs_status` is `true` and the flags are always empty, so emitting the
+    # AND arm there would make every probe pass.
+    grep -qF 'waiting it out, not counting a failure' "$dwatch"
+    no grep -qF 'waiting it out, not counting a failure' "$lwatch"
+
+    # The supervision constants reach the generated script, from the registry.
+    grep -qF 'threshold=5' "$dwatch"
+    grep -qF 'restart_floor=1800' "$dwatch"
+
+    # It captures before it acts, and SIGQUIT is on the capture path only —
+    # labelled, because the resulting err.log block reads like a native crash
+    # and has been read as one.
     grep -q -- 'kill -QUIT' "$dwatch"
+    grep -qF 'induced traceback (not a crash)' "$dwatch"
     grep -q 'core/stats' "$dwatch"
     grep -q 'vfs/stats' "$dwatch"
     grep -qF 'wedge.sulliwood-root.jsonl' "$dwatch"
@@ -1218,11 +1398,13 @@ else
     no grep -q 'nfsstat' "$lwatch"
 
     # The grace window before an unmounted point counts as a wedge is derived
-    # from the cache guard's own budget (120s default + 180s), never a knob of
+    # from the cache guard's own budget (120s default + 900s), never a knob of
     # its own — it can therefore never be shorter than a legitimate wait for the
-    # cache volume, which would make the watchdog fight the guard.
-    grep -qF 'mount_grace=300' "$dwatch"
-    grep -qF 'mount_grace=300' "$lwatch"
+    # cache volume, which would make the watchdog fight the guard. The +900 is
+    # what a cold nfsmount actually costs: sweep, cache guard, then a walk of the
+    # remote before it answers at all.
+    grep -qF 'mount_grace=1020' "$dwatch"
+    grep -qF 'mount_grace=1020' "$lwatch"
 
     # ── layer 3: run the guard against real directory trees ───────────────────
     harness=${guardHarness false}
@@ -1312,6 +1494,12 @@ else
       watchdogHarness {
         restartFloorSec = 0;
         mountGraceSec = 0;
+      }
+    }
+    wdand=${
+      watchdogHarness {
+        restartFloorSec = 0;
+        nfsStatus = true;
       }
     }
     etime=${etimeProbe}
@@ -1435,18 +1623,18 @@ else
     touch "$s7/mounted" "$s7/active"
     # Built with printf, not a heredoc: nix strips the common indentation of an
     # indented string but not the rest, and a shebang cannot carry leading space.
-    # The preamble probes the stat dialect at source time, so only the real call
-    # is allowed to hang.
+    # The probe is a readdir (`ls -1f`), not a `stat`: macOS answers `stat` on a
+    # mountpoint out of the root attribute cache, which is why the old probe
+    # reported `ok` through 345 recorded wedges on neo.
     {
       printf '#!/bin/sh\n'
-      printf 'case "''${1:-}" in --version) exit 0 ;; esac\n'
       printf 'sleep 300\n'
-    } > "$s7/bin/stat"
-    chmod 0755 "$s7/bin/stat"
+    } > "$s7/bin/ls"
+    chmod 0755 "$s7/bin/ls"
     started="$(date +%s)"
     PATH="$s7/bin:$PATH" "$wdfloor" "$s7/point" "$s7" 1 > "$s7/out"
     elapsed=$(( $(date +%s) - started ))
-    grep -q 'stat=timeout' "$s7/out"
+    grep -q 'fs=timeout' "$s7/out"
     # probeTimeoutSec is 2 in the harness; anything near 300 means it waited.
     [ "$elapsed" -lt 60 ]
 
@@ -1473,6 +1661,22 @@ else
     # ...so it restarted once, not once per pair of cycles.
     [ "$(wc -l < "$s8/restarts" | tr -d ' ')" = 1 ]
     [ "$(grep -c '"action":"restarted"' "$s8/wedge.jsonl")" = 1 ]
+
+    # 9. The AND arm, executed. With the kernel signal enabled but the probed
+    #    path not an NFS mount, `nfsstat` reports nothing about it and the flags
+    #    read empty — the healthy case. A failed filesystem call must then be
+    #    logged and waited out rather than counted, however many cycles run.
+    #    This is the neo defect inverted: the old OR treated the flag alone as
+    #    a wedge, restarted through 271 stalls that were clearing on their own,
+    #    and each restart guaranteed the next cold walk.
+    s9="$w/s9"
+    mkdir -p "$s9"
+    touch "$s9/mounted" "$s9/active"
+    "$wdand" "$s9/absent" "$s9" 4 > "$s9/out"
+    grep -q 'waiting it out, not counting a failure' "$s9/out"
+    no grep -q 'probe: unhealthy' "$s9/out"
+    [ ! -e "$s9/restarts" ]
+    [ ! -e "$s9/wedge.jsonl" ]
 
     # ── layer 3c: the concatenated activation must hand back the PATH it got ──
     #

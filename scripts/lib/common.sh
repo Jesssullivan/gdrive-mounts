@@ -66,12 +66,29 @@ assert_gnu_coreutils() {
   die "GNU coreutils required (found BSD stat). Run inside the flake: nix develop --command just <recipe>"
 }
 
-# Octal mode, or empty when neither stat dialect answers.
+# Octal mode of the file a path RESOLVES to, or empty when neither stat dialect
+# answers.
+#
+# `-L` on both branches: stat(2), not lstat(2). Neither GNU nor BSD stat
+# dereferences by default — measured 2026-09-05, GNU coreutils 9.11 and macOS
+# 26.7 both print `755` for a symlink to a `400` file — so without it every
+# caller was reading the *link's* own mode. sops-nix places each secret as a
+# symlink into its own 0700 store, so `just doctor` reported
+# `mode 755 (want 600)` for every secret on every host while the real files
+# were 0400. The check was comparing the wrong inode, not finding a problem.
 file_mode() {
+  # Fail closed on anything that does not resolve, and do it here so both
+  # dialects agree. `-e` follows symlinks, so a DANGLING link answers empty —
+  # which GNU stat does on its own (it errors) and BSD stat does not: macOS
+  # `stat -L` silently falls back to lstat and reports the link's own mode.
+  # Without this guard the same broken secret path would read `<empty>` on
+  # Linux and `700` on Darwin, and a caller comparing against 600 would print
+  # a mode for a file that is not there.
+  [ -e "$1" ] || return 1
   if stat --version >/dev/null 2>&1; then
-    stat -c '%a' -- "$1" 2>/dev/null
+    stat -L -c '%a' -- "$1" 2>/dev/null
   else
-    stat -f '%Lp' -- "$1" 2>/dev/null
+    stat -L -f '%Lp' -- "$1" 2>/dev/null
   fi
 }
 

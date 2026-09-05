@@ -20,13 +20,14 @@
     "pollInterval": "5m",
     "logLevel": "INFO",
     "statsInterval": "0",
-    "nfsMountOptions": ["soft", "intr", "timeo=100", "retrans=5", "dumbtimer"],
+    "logMaxBytes": 8388608,
+    "nfsMountOptions": ["soft", "intr", "timeo=600", "retrans=10", "dumbtimer"],
     "remoteControl": true,
     "watchdogEnable": true,
     "watchdogIntervalSec": 60,
     "watchdogProbeTimeoutSec": 10,
-    "watchdogFailureThreshold": 2,
-    "watchdogRestartFloorSec": 300
+    "watchdogFailureThreshold": 5,
+    "watchdogRestartFloorSec": 1800
   },
   "orgs": [
     {

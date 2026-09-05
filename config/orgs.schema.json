@@ -31,6 +31,7 @@
         "pollInterval",
         "logLevel",
         "statsInterval",
+        "logMaxBytes",
         "nfsMountOptions",
         "remoteControl",
         "watchdogEnable",
@@ -104,11 +105,17 @@
           "pattern": "^[0-9]+(ns|us|ms|s|m|h)?$",
           "description": "rclone --stats. \"0\" disables the periodic stats block; launchd never rotates a log, and the watchdog heartbeat already carries liveness."
         },
+        "logMaxBytes": {
+          "type": "integer",
+          "minimum": 65536,
+          "description": "Size at which the mount wrapper caps the two files this system appends to without bound — the unit's own .err.log and the per-mount wedge record — keeping two generations. Checked once per unit start, never on a timer. launchd rotates nothing: neo's err.log reached 13.6 MB / 208,067 lines, almost all of it goroutine dumps the watchdog itself induced. The cap is copy-truncate, not rename, because launchd holds an O_APPEND fd on the err.log from before the wrapper execs."
+        },
         "nfsMountOptions": {
           "type": "array",
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(=[A-Za-z0-9._-]+)?$" },
           "uniqueItems": true,
-          "description": "NFS *client* mount options, passed one per `rclone nfsmount --option`. nfsmount only: on Darwin rclone shells out to mount(8), which execs /sbin/mount_nfs, so these reach the kernel; on `rclone mount` the same flag means libfuse options instead. rclone hardcodes only port/mountport/tcp. `soft`+`intr` remove the `hard,nointr` bistability that makes a transient stall permanent and unprobeable; macOS `timeo` is in TENTHS of a second, so timeo=100 is 10s; `dumbtimer` stops the dynamic round-trip estimator deriving a microsecond timeout from a loopback RTT, which is what makes the default so brittle here. Verify a change landed with `nfsstat -m`, never by assuming."
+          "description": "NFS *client* mount options, passed one per `rclone nfsmount --option`. nfsmount only: on Darwin rclone shells out to mount(8), which execs /sbin/mount_nfs, so these reach the kernel; on `rclone mount` the same flag means libfuse options instead. rclone hardcodes only port/mountport/tcp. `soft`+`intr` remove the `hard,nointr` bistability that makes a transient stall permanent and unprobeable; `dumbtimer` stops the dynamic round-trip estimator deriving a microsecond timeout from a loopback RTT, which is what makes the default so brittle here. Verify a change landed with `nfsstat -m`, never by assuming.",
+          "$comment": "UNIT: macOS `timeo` is in TENTHS OF A SECOND. timeo=600 is 60s per RPC try; retrans=10 is ~10 minutes before a `soft` mount returns EIO. Not a preference: a cold Drive root listing through the rendered config measured 12.766s on neo 2026-09-05 (`time rclone lsjson <remote>:`), and go-nfs answers one connection serially, so a single READDIRPLUS slower than `timeo` stalls the whole NFS conversation and macOS sets `Status flags: 0x2,not responding`. The former timeo=100 (10s) sat BELOW that measured cold listing, which is what put neo in a wedge/restart loop. See docs/runbook.md."
         },
         "remoteControl": {
           "type": "boolean",
@@ -131,12 +138,12 @@
         "watchdogFailureThreshold": {
           "type": "integer",
           "minimum": 2,
-          "description": "Consecutive failed probes before the watchdog acts. Never 1: the not-responding flag is observed to flap on a ~15s timescale and clear on its own."
+          "description": "Consecutive failed probes before the watchdog acts. Never 1: the not-responding flag is observed to flap on a ~15s timescale and clear on its own. Raised 2 -> 5 on 2026-09-05: at intervalSec=60 a threshold of 2 acts after ~2 minutes, and neo recorded 271 self-recoveries commonly clearing after 3-4 minutes against 606 restarts — the watchdog was restarting through roughly two-thirds of a population of stalls that resolve on their own. 5 means five minutes of SUSTAINED unhealth."
         },
         "watchdogRestartFloorSec": {
           "type": "integer",
           "minimum": 60,
-          "description": "Minimum seconds between watchdog restarts of one mount. Held wedges are still recorded, so a floor hides nothing."
+          "description": "Minimum seconds between watchdog restarts of one mount. Held wedges are still recorded, so a floor hides nothing. Raised 300 -> 1800 on 2026-09-05: a restart SIGKILLs rclone and discards an in-process dir cache that has no on-disk backing, so the replacement must re-walk Drive cold. Restart uptimes on neo clustered at 380-1600s — never long enough to warm the tree — so a 300s floor let the loop re-arm before a cold start could ever reach steady state."
         }
       }
     },
