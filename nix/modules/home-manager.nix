@@ -534,6 +534,21 @@ let
       $DRY_RUN_CMD chmod 700 ${escapeShellArg settings.stateDir}
       $DRY_RUN_CMD install -m 600 ${effectiveSettingsFile} ${escapeShellArg "${effectiveSettingsPath}.new"}
       $DRY_RUN_CMD mv -f ${escapeShellArg "${effectiveSettingsPath}.new"} ${escapeShellArg effectiveSettingsPath}
+
+      # Every directory this module owns is 0700 (scripts/lib/common.sh, top).
+      # The secrets subtree is the one place that drifts: sops-nix creates the
+      # parents of the symlinks it places with a bare `mkdir -p`, which is
+      # 0755, and it exposes no per-secret parent-mode knob. Nothing actually
+      # leaks — the leaves are symlinks into sops-nix's own 0700 store — but a
+      # contract with a standing exception is not a contract, and `doctor`
+      # should not have to explain it.
+      #
+      # `-type d` is load-bearing: it matches directories by lstat, so a
+      # symlinked secret is never a candidate. `chmod` follows symlinks, and
+      # chmod-ing one of these leaves would rewrite the mode of a file inside
+      # sops-nix's store, which this module does not own and must not touch.
+      # Scoped to stateDir for the same reason.
+      $DRY_RUN_CMD find ${escapeShellArg "${settings.stateDir}/secrets"} -type d -exec chmod 700 {} + 2>/dev/null || true
     )
   '';
 

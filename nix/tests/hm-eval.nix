@@ -649,6 +649,22 @@ let
         && settingsEntry.after == [ "writeBoundary" ];
     }
     {
+      # sops-nix creates the parents of the symlinks it places with a bare
+      # `mkdir -p` (0755) and has no per-secret parent-mode knob, so the
+      # module normalises them where it already owns activation. Scoped to
+      # stateDir, and `-type d` only: chmod follows symlinks, and the secret
+      # leaves point into sops-nix's own store, which this module must not
+      # touch.
+      name = "activation-normalises-only-the-secret-dirs-it-owns";
+      ok =
+        hasInfix "-type d -exec chmod 700" settingsEntry.data
+        && hasInfix "${homeDir}/.local/state/gdrive-mounts/secrets" settingsEntry.data
+        # ...and it never reaches into sops-nix's own store, which this module
+        # does not own. (The prose in the emitted comment names sops-nix; the
+        # assertion is on the path, which is the thing that would do harm.)
+        && !(hasInfix ".config/sops-nix" settingsEntry.data);
+    }
+    {
       name = "activation-writes-effective-settings";
       ok =
         darwinCfg.home.activation ? gdriveMountsSettings
@@ -1254,6 +1270,13 @@ else
     # Activation records the settings it resolved, 0600, where doctor reads it.
     grep -q 'effective-settings.json' "$settings"
     grep -q -- '-m 600' "$settings"
+
+    # ...and normalises the secret directories it owns to 0700, by lstat
+    # (`-type d`) so a symlinked secret leaf is never chmod-ed through into
+    # sops-nix's own store.
+    grep -qF -- '-type d -exec chmod 700' "$settings"
+    grep -qF '.local/state/gdrive-mounts/secrets' "$settings"
+    no grep -qF '.config/sops-nix' "$settings"
 
     # That record is non-secret by construction: paths and knobs, no secrets.
     doc="$(grep -o '/nix/store/[^ ]*-gdrive-mounts-effective-settings.json' "$settings" | head -1)"
