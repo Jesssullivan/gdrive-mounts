@@ -383,6 +383,31 @@ sqlite3 <indexStateDir>/index.sqlite \
 Freshness SLO: `orgs.json` `defaults.indexFreshnessSloHours` (24h at time of
 writing). Raw per-org JSON at `<indexStateDir>/<org>.json`.
 
+### When an index run fails
+
+`<indexStateDir>/<org>.err` is the current run's stderr; `<org>.err.1`,
+`.err.2`, `.err.3` are the three runs before it, newest first. Read `.err.1`
+after a failure — the current file belongs to whatever ran next.
+
+Before 2026-09-05 there was no rotation and every start truncated the file, so
+the reason a run failed was gone by the time anyone looked. `just doctor` could
+say a run had failed and nothing on the host could say why.
+
+`index.intervalSec` is a fixed *period* (launchd `StartInterval`, systemd
+`OnUnitActiveSec`), not a gap between runs, and a full-tree
+`lsjson -R --fast-list` measured 4h40m to 8h44m on neo against a 6h interval —
+so the schedule overlapped itself. A start that finds a live run now stands
+down with
+
+```
+gdrive-index: an index run is already in flight (pid NNNN); standing down for this interval
+```
+
+and exits 0, because behaving correctly must not be recorded as a unit
+failure. The lock is `<indexStateDir>/index.lock/` (a directory: `mkdir` is
+atomic) holding the owner's pid; a lock whose pid is gone is cleared with a
+warning on the next start.
+
 ## Common failures
 
 | Symptom | Likely cause | Fix |

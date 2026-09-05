@@ -9,6 +9,18 @@
 # An org with no rendered config is skipped with a warning. An org whose
 # listing fails is recorded failed and makes the whole run exit non-zero, so a
 # dead token cannot look fresh. Only orgs that succeeded this run are rolled up.
+#
+# Two properties this script owes its supervisor, both learned on neo 2026-09:
+#
+#   - ONE RUN AT A TIME. `index.intervalSec` is a launchd `StartInterval` and a
+#     systemd `OnUnitActiveSec`, i.e. a fixed period, not a gap between runs.
+#     Successful runs here measured 4h40m to 8h44m against a 6h interval, so
+#     the schedule overlapped itself and two `lsjson -R --fast-list` walks ran
+#     against the same Drive and the same sqlite file. A second start now
+#     stands down.
+#   - THE FAILING RUN'S STDERR SURVIVES. `$err` is truncated by the next run's
+#     redirect, which erased the cause of 9 of the last 12 failures before
+#     anyone read them. It is rotated first, three generations deep.
 set -euo pipefail
 
 d="$(cd "$(dirname "$0")" && pwd)"
@@ -51,6 +63,50 @@ require_cmd rclone "run inside the flake: nix develop --command just index"
 [ -n "$CONF_DIR" ] || CONF_DIR="$(state_dir "$ORGS")"
 [ -n "$STATE_DIR" ] || STATE_DIR="$(index_state_dir "$ORGS")"
 mkdir_secure "$STATE_DIR"
+
+# ── one run at a time ───────────────────────────────────────────────────────
+# `mkdir` and not a `[ -f ]` test: creating a directory is atomic, so two
+# starts that race cannot both win. The pid inside is what makes a lock left by
+# a killed run recoverable rather than permanent.
+LOCK="$STATE_DIR/index.lock"
+LOCK_HELD=0
+index_unlock() { [ "$LOCK_HELD" = 1 ] && rm -rf -- "$LOCK" 2>/dev/null; return 0; }
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+  held="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  case "${held:-}" in "" | *[!0-9]*) held="" ;; esac
+  if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+    # Not an error: the supervisor fired on schedule and the previous walk is
+    # still going. Exit 0 so launchd/systemd do not record a failure for
+    # behaving correctly.
+    info "an index run is already in flight (pid $held); standing down for this interval"
+    exit 0
+  fi
+  warn "clearing a stale index lock (pid ${held:-unreadable} is gone): $LOCK"
+  rm -rf -- "$LOCK" 2>/dev/null || true
+  mkdir "$LOCK" 2>/dev/null || die "could not take the index lock: $LOCK"
+fi
+LOCK_HELD=1
+chmod 700 "$LOCK" 2>/dev/null || true
+printf '%s' "$$" > "$LOCK/pid"
+trap 'index_unlock' EXIT
+trap 'index_unlock; exit 130' INT
+trap 'index_unlock; exit 143' TERM
+
+# Keep the previous run's stderr. The redirect below truncates $err on every
+# start, and on neo that erased the reason for 9 of the last 12 failed runs —
+# `just doctor` could say a run failed and nothing on the host could say why.
+# Three generations: enough to see a pattern, bounded so it cannot grow.
+rotate_err() { # path [generations]
+  local f="$1" keep="${2:-3}" i
+  [ -s "$f" ] || return 0
+  i="$keep"
+  while [ "$i" -gt 1 ]; do
+    [ -e "$f.$((i - 1))" ] && mv -f -- "$f.$((i - 1))" "$f.$i"
+    i=$((i - 1))
+  done
+  mv -f -- "$f" "$f.1"
+}
 
 DB="$STATE_DIR/index.sqlite"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -132,6 +188,7 @@ while IFS= read -r org; do
 
   tmp="$STATE_DIR/$name.json.tmp"
   err="$STATE_DIR/$name.err"
+  rotate_err "$err"
   if rclone lsjson -R --fast-list --config "$conf" "${remote}:" >"$tmp" 2>"$err"; then
     mv -f -- "$tmp" "$STATE_DIR/$name.json"
     count="$(jq 'length' "$STATE_DIR/$name.json")"
@@ -141,7 +198,7 @@ while IFS= read -r org; do
     indexed=$((indexed + 1))
   else
     rm -f -- "$tmp"
-    warn "$name: listing failed (see $err)"
+    warn "$name: listing failed (see $err; the previous run's stderr is $err.1)"
     record_run "$name" failed "" "$started" "rclone lsjson failed; see $err"
     failed=$((failed + 1))
   fi

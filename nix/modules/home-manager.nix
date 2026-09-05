@@ -998,7 +998,17 @@ in
       intervalSec = mkOption {
         type = types.int;
         default = 21600;
-        description = "Seconds between index refreshes.";
+        description = ''
+          Seconds between index refreshes.
+
+          A fixed *period* — launchd `StartInterval`, systemd
+          `OnUnitActiveSec` — not a gap between runs, so it can be shorter
+          than a run. A full-tree `lsjson -R --fast-list` measured 4h40m to
+          8h44m on neo against this 6h default. The index script holds a lock
+          and stands down when a run is already in flight, so an overlap costs
+          a skipped interval rather than two walks over one Drive and one
+          sqlite file.
+        '';
       };
       stateDir = mkOption {
         type = types.str;
