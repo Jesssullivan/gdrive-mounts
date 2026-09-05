@@ -1,0 +1,11 @@
+{
+	"schema_version": 3,
+	"actions": {
+		"check": {
+			"command": "test",
+			"targets": ["//:ci_validation_suite"],
+			"capability": "rbe-linux-x86_64",
+			"result": { "mode": "status-only" }
+		}
+	}
+}

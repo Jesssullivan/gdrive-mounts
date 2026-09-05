@@ -11,10 +11,12 @@ default:
 # ── Local gates ─────────────────────────────────────────────────────────────
 
 # Every gate that runs without a build slot. This is the day-to-day gate.
-check: validate test-lib secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval
+check: validate test-lib secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval workflow-validate
 
-# Everything in `check` plus the two gates that need a builder or a bazel fetch.
-check-ci: check flake-check bazel-test
+# The exact action .github/lanes.json declares and the v4 fabric submits.
+# Nothing else is CI: there is no hosted lane.
+check-ci:
+    bazelisk test //:ci_validation_suite
 
 # Validate orgs.json, the nix settings SSOT, and the render pipeline (dummy secrets).
 validate:
@@ -36,13 +38,28 @@ endpoint-free-check:
 repo-manifest-validate:
     bash scripts/repo-manifest-validate.sh
 
+# actionlint the workflows, schema-check .github/lanes.json, and assert the
+# caller only submits actions that plan declares.
+workflow-validate:
+    bash scripts/workflow-validate.sh
+
+# gitleaks over the commit history (the dir scan cannot see a deleted secret).
+secrets-scan-history:
+    bash scripts/secrets-scan-history.sh
+
 # Prove the home-manager module evaluates. Eval only: no build slot needed.
 hm-eval:
     nix eval --raw ".#checks.$(nix eval --raw --impure --expr builtins.currentSystem).hm-eval.drvPath"
 
-# nix flake check. Needs a build slot; neo has none, so this is a CI lane.
+# nix flake check. Needs a build slot for every system; not in `check`.
 flake-check:
     nix flake check
+
+# Realise the home-manager eval proof on x86_64-linux (remote builder from a
+# darwin seat). `hm-eval` above stops at the drvPath; this one runs layers 2
+# and 3 of nix/tests/hm-eval.nix.
+hm-eval-build:
+    bash scripts/hm-eval-build.sh
 
 # ── Bazel graph ─────────────────────────────────────────────────────────────
 

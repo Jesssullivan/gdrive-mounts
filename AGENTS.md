@@ -23,14 +23,14 @@ target — see `docs/position.md`.
 | Fact | Source |
 |---|---|
 | Org registry, mount layout, scope, cache/index defaults | `orgs.json` (schema: `config/orgs.schema.json`) |
-| Why this repo exists, odrive coexistence, extracted-repo boundary, sting posture | `docs/position.md` |
+| Why this repo exists, odrive coexistence, extracted-repo boundary, CI posture, sting posture | `docs/position.md` |
 | How to lace up a new org, end to end | `docs/adoption.md` |
 | How to operate and debug a live mount | `docs/runbook.md` |
 | The secrets contract and how `lab` wires it | `docs/sops-integration.md` |
 | Linear project, draft issues → filed IDs | `docs/tracker.md` |
 | Writing style | `docs/STYLE.md` |
 | Dated receipts (bakeoffs, acceptance runs) | `docs/evidence/` |
-| The command surface | `justfile` — bare `just` lists recipes; `just doctor` is the agent cold-landing surface; `just check` runs the local gates; `just check-ci` runs those plus the CI-only gates |
+| The command surface | `justfile` — bare `just` lists recipes; `just doctor` is the agent cold-landing surface; `just check` runs the local gates; `just check-ci` runs `bazelisk test //:ci_validation_suite`, the exact action CI submits |
 
 ## House-pattern sources
 
@@ -52,13 +52,16 @@ here), prompt-toon (agent-output shaping conventions).
 | Gate | Command |
 |---|---|
 | Local everything | `nix develop --command just check` |
-| CI everything | `just check-ci` |
+| The exact action CI submits | `just check-ci` |
 | Schema/render validation | `just validate` |
 | Secrets scan | `just secrets-scan-dir` |
 | Endpoint-free doctrine | `just endpoint-free-check` |
 | Flake checks | `just flake-check` |
+| CI surface (actionlint + ActionPlan) | `just workflow-validate` |
+| Secrets scan, commit history | `just secrets-scan-history` |
 | Shell library unit tests | `just test-lib` |
 | Home-manager module eval | `just hm-eval` |
+| Home-manager eval proof, built | `just hm-eval-build` |
 | Bazel candidate graph | `just bazel-test` |
 | Manifest conformance | `just repo-manifest-validate` |
 | Agent cold-landing / live state | `just doctor` |

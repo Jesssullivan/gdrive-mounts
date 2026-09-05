@@ -149,6 +149,28 @@ expand_home() {
 
 script_dir() { printf '%s' "${GDM_SCRIPT_DIR:-$(cd "$(dirname -- "$0")" && pwd)}"; }
 
+# Physical path of a file, chasing the whole symlink chain by hand: `readlink -f`
+# is GNU-only and `stat -f` means something else entirely on BSD, so neither is
+# portable across the two platforms this repo runs on.
+#
+# The caller that needs this is a Bazel test: every runfile is a symlink into
+# the source checkout, so the physical path of a tracked file is how a target
+# reaches the repository (git history, a flake root) that its runfiles tree
+# only mirrors.
+resolve_link() {
+  local p="$1" t n=0
+  while [ -L "$p" ]; do
+    n=$((n + 1))
+    [ "$n" -le 64 ] || die "symlink loop resolving $1"
+    t="$(readlink "$p")"
+    case "$t" in
+      /*) p="$t" ;;
+      *) p="$(cd "$(dirname "$p")" && pwd)/$t" ;;
+    esac
+  done
+  printf '%s' "$p"
+}
+
 repo_root() {
   local r
   r="$(git rev-parse --show-toplevel 2>/dev/null || true)"

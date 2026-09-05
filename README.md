@@ -15,6 +15,23 @@ just --list                          # every recipe, inside the devShell
 just doctor                          # live state, once secrets are wired
 ```
 
+## CI
+
+One lane: GloriousFlywheel v4. `.github/workflows/ci.yml` is a thin caller into
+`tinyland-inc/ci-templates`' `spoke-ci-v4.yml` (pinned at
+`32e39ced0008edf4564ebeb173a5e8fbf069e28f`, v5.1.0) and submits the single
+action declared in `.github/lanes.json` — `test //:ci_validation_suite`,
+capability `rbe-linux-x86_64`, result `status-only`. Every gate lives in that
+Bazel suite; there is no hosted runner lane and no fallback.
+
+The v4 check **fails closed today** with a named gap: a v4 dispatch edge is an
+owner-overlay runner set and GloriousFlywheel admits organizations only
+(`tofu/modules/arc-runner/main.tf:112`), so `Jesssullivan` — a personal
+account — cannot own one, and no `gf-v4-dispatch` runner answers this repo. It
+stays that way until an organization is chosen and its owner ceremony lands.
+`docs/position.md` carries the full posture. `nix develop --command just check`
+is the operator gate meanwhile; `just check-ci` runs the exact suite v4 submits.
+
 ## Architecture
 
 Secrets enter as file paths, never values. `orgs.json` and `nix/lib/plan.nix`

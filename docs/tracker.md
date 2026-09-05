@@ -16,6 +16,6 @@ removed once filed; the issues below are the tracker surface.
 | [TIN-3882](https://linear.app/tinyland/issue/TIN-3882) | sting lane (client-only) | Backlog |
 | [TIN-3883](https://linear.app/tinyland/issue/TIN-3883) | "GFTB Stuff" rw promotion (explicit operator gate) | Todo |
 | [TIN-3884](https://linear.app/tinyland/issue/TIN-3884) | odrive drawdown decision packet | Backlog |
-| [TIN-3885](https://linear.app/tinyland/issue/TIN-3885) | GloriousFlywheel enrollment apply + `GF_ENROLLED` flip | Todo |
+| [TIN-3885](https://linear.app/tinyland/issue/TIN-3885) | GloriousFlywheel enrollment — reframed 2026-09-05: the v3 `GF_ENROLLED` / `tinyland-nix` plan is retired; what is open is a v4 owner organization + its owner ceremony (`docs/position.md`) | Todo |
 
 Session receipts: finances `docs/agent-notes/2026-08-17-gdrive-mounts-repo-work-plan.md`.

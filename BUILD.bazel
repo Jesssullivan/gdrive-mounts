@@ -10,10 +10,17 @@ rclone, gitleaks, sqlite, check-jsonschema. `.bazelrc`'s `test --test_env=PATH`
 line forwards the invoking shell's PATH into the test's runtime environment,
 so these targets only pass when the invoking shell is already inside the
 devShell. The operator entrypoint is `just bazel-test`, which runs
-`bazelisk test //...`; CI never calls bazel directly — the `check` job's
-workflow step is `nix develop --command just check-ci`, which runs
-`bazel-test` as one of its recipes, so PATH is always devShell PATH by the
-time bazel starts.
+`bazelisk test //...`, and `just check-ci`, which runs
+`bazelisk test //:ci_validation_suite` — the exact action the v4 ActionPlan
+(`.github/lanes.json`) submits. PATH is devShell PATH by the time bazel
+starts because both go through `nix develop`.
+
+`//:ci_validation_suite` is the whole CI surface. There are no hosted jobs
+left to fold anything into: the retired `public-source`, `darwin-eval`,
+`secrets-scan` and `actionlint` ubuntu/macos jobs are now
+`:hm_eval_test`, `:secrets_scan_history_test` and `:workflow_validation_test`
+below, and the `check (tinyland-nix)` job and its `vars.GF_ENROLLED` gate are
+gone with them (GloriousFlywheel v4 ruling, 2026-09-05).
 
 Every script `cd`s to `git rev-parse --show-toplevel`, falling back to `pwd`
 when that fails (no `.git` inside the Bazel runfiles tree). `sh_test`'s
@@ -46,6 +53,30 @@ filegroup(
         "orgs.json",
         "tinyland.repo.json",
     ],
+)
+
+# The CI surface itself: the v4 caller, the ActionPlan it submits, and the
+# vendored ActionPlan schema they are checked against.
+filegroup(
+    name = "ci_surface_sources",
+    srcs = [
+        ".github/lanes.json",
+        "docs/schemas/lanes.schema.json",
+    ] + glob([".github/workflows/*.yml"]),
+)
+
+# Everything `nix build .#checks.x86_64-linux.hm-eval` reads. The flake is
+# copied to the store as a whole tree, so this has to be complete.
+filegroup(
+    name = "flake_sources",
+    srcs = [
+        "flake.lock",
+        "flake.nix",
+        "orgs.json",
+    ] + glob([
+        "config/**",
+        "nix/**",
+    ]),
 )
 
 # All shell scripts, including scripts/lib/common.sh — sourced by name, so
@@ -126,5 +157,78 @@ sh_test(
     tags = [
         "local",
         "requires-network=no",
+    ],
+)
+
+# ── Folded-in CI surface (was four hosted GitHub-runner jobs) ───────────────
+
+# Was the hosted `actionlint` job, plus the ActionPlan checks it never had.
+sh_test(
+    name = "workflow_validation_test",
+    srcs = ["scripts/workflow-validate.sh"],
+    data = [
+        ":ci_surface_sources",
+        ":config_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
+)
+
+# Was the hosted `secrets-scan` job. Git history is not a Bazel input, so this
+# target reads the source checkout through its own runfiles symlinks and fails
+# closed when no repository is reachable — see the script's header. That is a
+# real boundary, not a soft skip: on an input tree with no `.git` (a shallow
+# checkout, or an exported source snapshot) this target goes red rather than
+# green, and the message names why.
+sh_test(
+    name = "secrets_scan_history_test",
+    srcs = ["scripts/secrets-scan-history.sh"],
+    data = [
+        ":config_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "no-sandbox",
+        "requires-network=no",
+    ],
+)
+
+# Was the hosted `darwin-eval` job and the build half of `public-source`.
+# One x86_64-linux instance evaluates both platform branches, so the Darwin
+# units are still proved (nix/tests/hm-eval.nix). `nix` comes from the ambient
+# PATH like every other tool here; this one also needs the nix daemon and a
+# builder for x86_64-linux, so it is neither sandboxed nor network-free.
+sh_test(
+    name = "hm_eval_test",
+    srcs = ["scripts/hm-eval-build.sh"],
+    data = [
+        ":config_sources",
+        ":flake_sources",
+        ":scripts",
+    ],
+    tags = [
+        "local",
+        "no-sandbox",
+    ],
+)
+
+# The one action `.github/lanes.json` submits: `test //:ci_validation_suite`,
+# capability rbe-linux-x86_64, result status-only. Adding a gate means adding
+# it here; there is no second place where CI is configured.
+test_suite(
+    name = "ci_validation_suite",
+    tests = [
+        ":endpoint_free_test",
+        ":hm_eval_test",
+        ":lib_test",
+        ":repo_manifest_test",
+        ":secrets_scan_history_test",
+        ":secrets_scan_test",
+        ":validate_test",
+        ":workflow_validation_test",
     ],
 )
