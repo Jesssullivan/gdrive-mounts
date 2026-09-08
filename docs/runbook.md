@@ -373,8 +373,8 @@ that does nothing.
 | Code | Who | Meaning |
 |---|---|---|
 | `78` | mount wrapper | Cache guard gave up. The cache volume was not a mountpoint, or the cache directory could not be created there, for the whole `cache.waitSeconds` window (120s by default). The wrapper never falls back to the boot disk. The reason, with the offending path and its mode, is on the `FATAL` line in the `.err.log` and in `<stateDir>/last-error.<org>-root`. |
-| `75` | mount wrapper | The stale-mount sweep failed: something is still mounted at the point after `umount -f`. The wrapper refuses to mount on top of it — that would leave a live process, a listening port and a client addressed to the dead one, silently. The supervisor retries after its throttle interval. If it persists, unmount by hand (`umount -f <point>`) and look for a process blocked on the old mount. |
-| rclone's own | mount wrapper | Anything else is rclone's exit status, forwarded because the wrapper `exec`s it. `0` after a clean `launchctl bootout` is normal. `2` is normal after a watchdog `SIGQUIT` — that is the Go runtime dumping goroutines and exiting. |
+| `75` | mount wrapper | The stale-mount sweep failed: something is still mounted at the point after `umount -f`. The wrapper refuses to mount on top of it. The supervisor can retry after its throttle interval. Preserve cache and evidence; do not escalate to a manual force-unmount without a separately approved recovery. See the lifecycle safety boundary below. |
+| rclone's own | mount wrapper | Anything else is rclone's exit status, forwarded because the wrapper `exec`s it. A handled Unix SIGTERM normally exits 143; SIGQUIT normally exits 2 after dumping goroutines. An exit status alone proves neither non-forcing unmount nor completed uploads. |
 | `0` / `1` / `2` | `just doctor` | All OK / at least one WARN / at least one FAIL. |
 | `2` | any CLI | Usage error. |
 | `70` | any CLI | `scripts/lib/common.sh` was not found next to the script — a broken install, not a runtime fault. |
@@ -387,12 +387,51 @@ be a real mountpoint, which is what keeps the cache off the boot disk.
 
 ## Lifecycle commands
 
+### Recovery safety boundary
+
+For a writable mount, an unanswered upload-status request means the queue is
+unknown, not empty. Do not use stop/restart commands as read-only probes or
+as a way to establish drainage. Preserve the complete org VFS cache, including
+data and metadata, the refreshed rclone config and its remote identity, and
+existing error/watchdog evidence. Never run two processes against that cache.
+
+In pinned rclone 1.75.0, SIGINT/SIGTERM invoke exit handlers and the foreground
+mount finalizer calls the backend unmount. On macOS, the NFS backend requests
+`diskutil umount force` unless it has already recognized an external unmount.
+Therefore `launchctl bootout` is not a guaranteed non-forcing stop.
+See the pinned [signal handler](https://github.com/rclone/rclone/blob/v1.75.0/lib/atexit/atexit_unix.go#L11-L19),
+[mount finalizer](https://github.com/rclone/rclone/blob/v1.75.0/cmd/mountlib/mount.go#L382-L413),
+and [NFS backend](https://github.com/rclone/rclone/blob/v1.75.0/cmd/nfsmount/nfsmount.go#L97-L126).
+VFS shutdown cancels background work; it is not a successful upload-drain
+receipt. [Pinned VFS shutdown](https://github.com/rclone/rclone/blob/v1.75.0/vfs/vfs.go#L359-L395).
+
+The repository adds another independent hazard: watchdog capture tolerates
+failed RC queries, then sends SIGQUIT and requests a forced restart. Startup
+force-unmounts an existing mount before launching its replacement. Stopping a
+loaded mount does not make the watchdog stand down, and an already-running
+capture has no final unit-state recheck before its signal. A recovery review
+must account for both supervisors and any in-flight capture, not only writers.
+The Neo pacing candidate changes neither shutdown mechanism.
+
+A proposed no-force recovery must establish paused writers and quiescent
+supervision before detach, then a successful non-forcing detach while the
+server is still serving, external-unmount recognition and preserved cache
+identity before replacement. This is a review
+boundary, not an approved or live-tested recovery procedure. If those conditions
+cannot be established, stop: do not substitute SIGTERM, SIGQUIT, `kickstart -k`
+or force-unmount. Recovery and cache-loss risk require a separate operator
+decision; source preparation or general switch permission is not that decision.
+
+### Mutating entrypoints
+
+These commands are not an ordered recovery recipe. Use only the command
+covered by the reviewed operation after the boundary above is satisfied.
+
 ```console
 nix develop --command just render [ORG]   # materialize rclone-<org>.conf (0600)
 nix develop --command just index          # refresh the metadata index now
 launchctl kickstart -k gui/$(id -u)/dev.tinyland.gdrive-mounts.sulliwood-root
-launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.sulliwood-root   # stop cleanly (SIGTERM → rclone unmounts)
-umount -f ~/GDrive/sulliwood              # only for a dead mount left by a crash
+launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.sulliwood-root   # not a guaranteed non-forcing stop
 ```
 
 ## Operator probes
@@ -414,9 +453,6 @@ tail -20 ~/Library/Logs/tinyland/gdrive-mounts.sulliwood-root.err.log
 # 4. The breadcrumb the guard leaves. Present means the last start failed;
 #    the wrapper deletes it on a start that gets past the guard.
 cat ~/.local/state/gdrive-mounts/last-error.sulliwood-root
-
-# 5. Restart one unit after fixing the cause.
-launchctl kickstart -k gui/$(id -u)/dev.tinyland.gdrive-mounts.sulliwood-root
 ```
 
 Prefer `launchctl list <label>` over `launchctl print <domain>/<label>`: `print`
@@ -424,9 +460,11 @@ dumps the unit's whole inherited environment, which on a fleet host can include
 secret-bearing values. `list` prints the PID and exit status, which is what
 these probes need.
 
-On Linux the equivalents are `systemctl --user status gdrive-mounts-<org>-root`,
-`journalctl --user -u gdrive-mounts-<org>-root -n 20`, and
-`systemctl --user restart gdrive-mounts-<org>-root`.
+On Linux the read-only equivalents are
+`systemctl --user status gdrive-mounts-<org>-root` and
+`journalctl --user -u gdrive-mounts-<org>-root -n 20`.
+`systemctl --user restart gdrive-mounts-<org>-root` is a mutating lifecycle
+operation, not a probe.
 
 ## Index (the agent/AX query surface)
 
@@ -467,17 +505,20 @@ warning on the next start.
 
 ## Common failures
 
+Any stop/restart advice below is subject to the lifecycle safety boundary;
+a symptom alone does not authorize replacing a writable mount with unknown uploads.
+
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | agent flaps, err log `invalid_grant` | expired refresh token | `just mint-token <org>`, `just seed-lab <org>`, re-switch |
 | agent flaps, err log `invalid_grant`, right after an operator revoked access in Workspace/GCP admin | revoked consent, not mere expiry | full re-consent required — repeat `docs/adoption.md` steps 0–3 for that org, not just a token refresh |
 | agent restart-loops, exits `78`, breadcrumb says `cache volume … does not exist` or `… is not a mountpoint` | cache SSD absent or not mounted at mount time | mount the SSD; the agent waits ~120s then fails loud once — it never spills onto the boot disk |
 | agent restart-loops, exits `78`, breadcrumb says `… is not writable by <user>` and names a mode | the cache subtree is genuinely not writable — a re-formatted or re-plugged volume, or a directory created by another user | the breadcrumb names the exact path and its mode/owner; fix that one directory's ownership, then kickstart the agent. The guard tests the cache subtree, not the volume root, so a root-owned `/Volumes/<name>` is not by itself a fault |
-| reads under the mountpoint hang (`stat` still answers from cache) | dead NFS loopback: rclone was killed without unmounting | `umount -f` the mountpoint, then kickstart the agent; the wrapper does this sweep itself on every start (bakeoff evidence 2026-08-18) |
-| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | the watchdog restarts it within two probe cycles; if it is off, kickstart the agent. A single flap that clears itself is normal and is not a fault — see `docs/evidence/2026-08-19-nfs-wedge.md` |
-| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount detached — wedge class 2. rclone's NFS server goroutines are gone but `mountlib` is still waiting to be unmounted, so it never exits and no supervisor notices | the watchdog restarts it once the unit is past the grace window; the mount is back within ~10s. If it is off, kickstart the agent |
+| reads under the mountpoint hang (`stat` still answers from cache) | dead NFS loopback may remain after rclone exits; a live but wedged server is also possible | preserve cache and reconcile uploads under the lifecycle safety boundary; a responding `stat` does not authorize force-unmount or restart |
+| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | inspect the read-probe and wedge records. Automatic restart depends on confirmed failures, the configured threshold, startup grace and restart floor; no recovery-time guarantee follows. A single flag transition can self-clear. Apply the lifecycle safety boundary before any manual restart |
+| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount may have detached — wedge class 2. In the observed case, NFS server goroutines exited while `mountlib` kept waiting | inspect unit state and the wedge record. Automatic recovery is subject to startup grace, restart floor and cold-start work; it is not guaranteed within a fixed number of seconds. Apply the lifecycle safety boundary before any manual restart |
 | the watchdog restarts a mount repeatedly | recurrence, not a watchdog fault | read the wedge record: a rising `restart_count` with a falling `uptime_sec` is a degrading mount. Check the captures and the network before raising the restart floor |
-| plain `umount` says `Resource busy` right after activity | NFS handles still cached | stop the agent instead (`launchctl bootout gui/$(id -u)/dev.tinyland.gdrive-mounts.<org>-root` sends SIGTERM; rclone unmounts cleanly), or `umount -f` |
+| plain `umount` says `Resource busy` right after activity | open writers or cached NFS handles may remain | stop the recovery attempt and preserve the current state. Do not replace the failed non-forcing detach with `bootout` or `umount -f`; review the lifecycle safety boundary |
 | slow first `ls` of a big directory | cold VFS dir cache | expected once; the dir-cache TTL keeps it warm after — use the index for search, not `ls`, on a cold mount |
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |
 | an app reports "you don't have permission" once **per file** when writing to a read-only mount, instead of naming the volume | `rdonly` did not reach the kernel, so the VFS refusal arrives as `NFS3ERR_ACCES` and every read-only signal (`MNT_RDONLY`, `statvfs` `ST_RDONLY`, `access(W_OK)`) disagrees with it | `mount \| grep GDrive` must say `read-only`. If it does not, the option was rejected or the unit predates it — kickstart the agent, then see "Mount semantics" |

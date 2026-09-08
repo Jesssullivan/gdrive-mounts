@@ -436,3 +436,46 @@ No live mount/corpus read, upload, cache change, recovery, switch or runtime
 build occurred in this pass. The separate lab lane still needs to return an
 exact closure and proposed bounded recovery sequence; the relayed question
 does not authorize recovery. Neither SWITCH READY nor GFTB COMPLETE is claimed.
+
+## Non-forcing recovery source audit
+
+The operator subsequently required that communication with the parallel lab
+agent occur only after verified switch readiness. Signed commit `66979c8`
+records that boundary in `AGENTS.md`; no interim handoff or relay request was
+sent during this pass.
+
+A local metadata-only admission check at 20:32:56Z still resolved the active
+Home Manager profile to `spv92312m7qv67vs0fd4qwb7w33ika93`. The installed
+Sulliwood launch plist points at the immutable wrapper
+`/nix/store/s7lc1h9jjq2f67glmzd74vlisbnvjks2-gdrive-mount-gdrive-mounts-sulliwood-root`.
+That wrapper references gdrive source `154aca2` and rclone 1.75.0. Effective
+settings retain NFS `timeo=100`/`retrans=5` and watchdog threshold 2/floor 900.
+The previously evaluated Darwin photo interpreter remains absent. No RC query,
+mounted-directory read, corpus inventory or service action ran.
+
+The shutdown audit found a material reason not to describe a service stop as
+non-forcing. Pinned rclone's Unix SIGINT/SIGTERM handling invokes exit handlers;
+the foreground mount finalizer reaches the NFS backend's macOS forced-unmount
+callback unless external unmount has already been recognized. VFS shutdown
+cancels background work rather than proving a completed upload queue. Sources:
+[signal dispatch](https://github.com/rclone/rclone/blob/v1.75.0/lib/atexit/atexit.go#L37-L52),
+[signal list](https://github.com/rclone/rclone/blob/v1.75.0/lib/atexit/atexit_unix.go#L11-L19),
+[mount finalizer](https://github.com/rclone/rclone/blob/v1.75.0/cmd/mountlib/mount.go#L382-L413),
+[NFS unmount](https://github.com/rclone/rclone/blob/v1.75.0/cmd/nfsmount/nfsmount.go#L97-L126),
+[VFS shutdown](https://github.com/rclone/rclone/blob/v1.75.0/vfs/vfs.go#L359-L395).
+
+Repo inspection independently confirms the watchdog can proceed from failed
+RC diagnostics to SIGQUIT and `kickstart -k`, and startup force-unmounts any
+existing mount. An in-flight watchdog capture lacks a final unit-state check.
+These are present in the deployed input and the pacing candidate, not new
+runtime changes from this pass. The reviewed code does not supply a
+non-forcing recovery guarantee or an upload-drain prerequisite for restart.
+
+The runbook now separates mutating lifecycle commands from read-only probes,
+removes the promise that `bootout` unmounts cleanly, and removes force-unmount
+as the default next step after a busy mount. It records the supervisor,
+external-unmount and cache-preservation proof needed before a no-force
+recovery can be proposed. This corrects unsafe operational advice; it does
+not implement, authorize or prove a live recovery. Existing cache bytes,
+metadata, config, logs and service state were untouched. No switch or photo
+completion is claimed, and no message was sent to the parallel lab agent.
