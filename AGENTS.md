@@ -16,7 +16,9 @@ target — see `docs/position.md`.
    operator-in-browser act.
 4. sting is client-only. Nothing durable runs there.
 5. Signed commits, PR flow. No direct push to `main` past the initial
-   scaffold commit.
+   scaffold commit. Keep this repository private and protect exact
+   `refs/heads/main` with required PRs and verified signatures, no deletion
+   or force-push, and no bypass actors (operator ratification: 2026-09-08).
 6. Photo consolidation keeps each distinct original and one accepted WebP
    in Drive. Preserve existing orientation and publication restrictions.
    Deduplicate by verified content and Drive ID, never filename alone;

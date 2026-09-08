@@ -199,3 +199,47 @@ The temporary lab source worktree was removed. The primary lab checkout's
 other-seat changes remain untouched. The owner protection decision and fresh
 Neo queue/recovery evidence are the next gates; photo retirement still needs
 its own exact-manifest approval after live verification.
+
+## Follow-through — September 8, private main protection
+
+The operator explicitly approved protecting `main` under this repository's
+signed-commit/PR-only contract while retaining private visibility. Invariant 5
+of `AGENTS.md` records the ruling.
+
+At 19:00:05Z, GitHub created active repository ruleset
+[`main-signed-pr-only` (22571993)](https://github.com/Jesssullivan/gdrive-mounts/rules/22571993),
+targeting only `refs/heads/main`. It requires PRs and verified commit
+signatures, blocks deletion and non-fast-forward updates, and has no bypass
+actors. Independent reviewer approvals, status contexts and a merge queue
+were not added. Existing merge, squash and rebase methods remain enabled.
+
+Separate API readbacks verified the active rules, `current_user_can_bypass:
+never`, `main.protected: true` at unchanged source
+`2cd5b8779adb3767937341ab2c20b352a1348152`, and repository `private: true`.
+No credentials, visibility, source commits or publisher admission policy were
+changed. The previously observed source-protection blocker is resolved.
+
+After rechecking lab PR #1691 remained open, draft and at exact head
+`32c05ad4cb729a9848712313ab0679672cab80d9`, the registered publisher was
+dispatched once:
+[run 34266512240](https://github.com/tinyland-inc/lab/actions/runs/34266512240).
+Dispatch succeeded; completion and publication were not inspected or awaited.
+No cache-registry commit is claimed. Before using its result, verify the
+GitHub-signed commit has that exact parent and changes only
+`config/nix-private-input-cache.json`, then carry it to the signed minimal
+delivery branch with provenance. That branch remains at
+`0282fb4056b911bc335dddcdbda671209b056c94`, not pushed or activated.
+
+The latest bounded Neo admission at 18:55:39Z still reported memory pressure
+level 2, 6099.25 MiB swap use and about 63 MiB free RAM on the 8 GiB host.
+TinylandSSD's exact UUID matched, its mount was writable, and container free
+space was 2746544390144 bytes. The sole strict `vfs/stats` request timed out
+after 12003 ms with zero response bytes. Upload drainage, errors and
+out-of-space state remain unknown, not zero. Generation 25, mount PID 60628
+and the old watchdog settings remained active.
+
+No live photo operation, switch, remount, workload termination or new worktree
+was performed. Fresh queue/recovery admission, a governed registry result,
+candidate closure realization and comparison still precede the attended
+direct-local switch. The documentation change passed `git diff --check` and
+`just secrets-scan-dir`; no new runtime test result is claimed.
