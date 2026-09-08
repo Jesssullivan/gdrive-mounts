@@ -11,7 +11,7 @@ default:
 # ── Local gates ─────────────────────────────────────────────────────────────
 
 # Every gate that runs without a build slot. This is the day-to-day gate.
-check: validate test-lib secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval workflow-validate
+check: validate test-lib test-photos secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval workflow-validate
 
 # The exact action .github/lanes.json declares and the v4 fabric submits.
 # Nothing else is CI: there is no hosted lane.
@@ -25,6 +25,10 @@ validate:
 # Unit-test scripts/lib/common.sh in a temp dir. No network, no real secrets.
 test-lib:
     bash scripts/test-lib.sh
+
+# Synthetic photo safety contracts; no real photos, credentials, or network.
+test-photos:
+    bash scripts/test-photos.sh
 
 # gitleaks over the working tree, fail-closed. History is a CI lane.
 secrets-scan-dir:
@@ -84,6 +88,12 @@ index:
 # Report tools, orgs, secrets, configs, cache, mounts, index, scope. --json for agents.
 doctor *ARGS:
     bash scripts/doctor.sh {{ ARGS }}
+
+# Plan/apply/verify/retire a private, explicitly scoped photo manifest.
+# Positional arguments preserve spaces in paths without shell re-evaluation.
+[positional-arguments]
+photos *ARGS:
+    bash scripts/photos.sh "$@"
 
 # ── Adoption lane (operator terminal; consent happens in a browser) ─────────
 

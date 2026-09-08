@@ -15,6 +15,7 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
+        photoPython = pkgs.python3.withPackages (ps: [ ps.pillow ps.pillow-heif ]);
         version = "0.1.0-dev+${self.shortRev or self.dirtyShortRev or "unknown"}";
       in
       {
@@ -30,6 +31,8 @@
 
             # Every operator script becomes gdrive-mounts-<name>.
             for s in scripts/*.sh; do
+              # Keep image dependencies out of ordinary HM mount installs.
+              case "$s" in scripts/photos.sh|scripts/test-photos.sh) continue ;; esac
               install -m0755 "$s" "$out/bin/gdrive-mounts-$(basename "$s" .sh)"
             done
 
@@ -43,7 +46,34 @@
           '';
         };
 
+        packages.photos = pkgs.stdenvNoCC.mkDerivation {
+          pname = "gdrive-mounts-photos";
+          inherit version;
+          src = ./.;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          dontConfigure = true;
+          dontBuild = true;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin $out/libexec/gdrive-mounts
+            install -m0644 scripts/gdrive_photos.py $out/libexec/gdrive-mounts/
+            makeWrapper ${photoPython}/bin/python3 $out/bin/gdrive-mounts-photos \
+              --add-flags "$out/libexec/gdrive-mounts/gdrive_photos.py" \
+              --set PYTHONDONTWRITEBYTECODE 1 \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.rclone ]}
+            runHook postInstall
+          '';
+          meta.mainProgram = "gdrive-mounts-photos";
+        };
+
         checks = {
+          photos = pkgs.runCommand "gdrive-mounts-photo-contracts"
+            { nativeBuildInputs = [ photoPython ]; }
+            ''
+              export PYTHONDONTWRITEBYTECODE=1
+              bash ${self}/scripts/test-photos.sh
+              touch $out
+            '';
           # Structural validation of orgs.json + dummy-secret render + rclone parse.
           validate = pkgs.runCommand "gdrive-mounts-validate"
             { nativeBuildInputs = [ pkgs.jq pkgs.rclone pkgs.check-jsonschema ]; }
@@ -88,6 +118,7 @@
             pkgs.actionlint
             pkgs.check-jsonschema
             pkgs.shellcheck
+            photoPython
           ];
         };
 

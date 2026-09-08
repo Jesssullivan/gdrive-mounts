@@ -117,8 +117,8 @@ delivers either to a live mount. All three must happen, in this order, and
    a consent URL on stderr and the operator re-consents in the browser at
    the new scope. Then `just seed-lab <org>` re-encrypts into lab, and the
    operator commits the ciphertext there.
-3. **Delivery** — the lab pin advance plus `just nix-switch macbook-neo`
-   (operator, attended — never agent-run). The new plan drops `--read-only`
+3. **Delivery** — the lab pin advance plus the reviewed, attended local
+   switch described in `docs/adoption.md`. The new plan drops `--read-only`
    and `rdonly` together, and the new token backs the write scope.
 
 ### Worked example: the sulliwood promotion, 2026-08-22
@@ -145,10 +145,12 @@ the same day: `just mint-token sulliwood` ran operator-attended at ~12:56Z
 (consent as the org account at the full `drive` scope, refresh fingerprint
 `cd155b7a83ee` per the mint record), and `just seed-lab sulliwood` delivered
 the re-encrypted leaves to lab (commit `ca5b9a82`, merged in lab PR #1400).
-Part 3 — the attended switch — is the remainder; until it lands, the live
-mount still runs the old plan and token. The acceptance test for the
-completed promotion — and the post-switch validation checklist that proves
-it — is [`docs/agent-symbolic-manipulation.md`](agent-symbolic-manipulation.md).
+Part 3 subsequently landed: TIN-4000 records an August 24 historical soak
+PASS, and the September 8 inspection found an active writable Neo mount.
+Do not re-mint this already-promoted credential because this historical
+example once described delivery as pending. Current mount reliability and
+the later corrected photo set still need their own acceptance evidence;
+see [`docs/agent-symbolic-manipulation.md`](agent-symbolic-manipulation.md).
 
 ## Adding a brand-new org, end to end
 
@@ -175,13 +177,13 @@ just mint-token <org>
 #    wipes the stage; stops before git
 just seed-lab <org>
 
-# 4. lab wrapper PR: paste the printed snippet — sops leaves are
-#    presence-gated (lib.optionalAttrs + builtins.pathExists) so an
-#    unseeded org degrades instead of blocking activation.
+# 4. lab wrapper PR: require host/org opt-in AND encrypted leaf presence.
+#    The wrapper fails evaluation if an enabled org lacks its complete pair.
 #    Wiring shape: docs/sops-integration.md, "Lab side (consumer) shape".
 
-# 5. operator, attended, never agent-run
-just nix-switch macbook-neo   # in lab
+# 5. reviewed source, operator-authorized and attended, in lab
+NIX_SWITCH_LOCAL_BUILD_REASON="reviewed org enrollment" \
+  just nix-switch-local 'jess@macbook-neo'
 
 # 6. verify
 just doctor          # or --json for the machine-readable form

@@ -1,0 +1,1247 @@
+#!/usr/bin/env python3
+"""Manifest-bound, serial reconciliation of the Sulliwood GFTB photo corpus.
+
+The Drive adapter never reads or prints credentials. Remote reads use immutable
+Drive IDs, not the pathname view which collapses duplicate Google Drive names.
+All new photo bytes are staged through the guarded mount; verified IDs are
+promoted via the Drive API. Retirement is a recoverable move, requires the
+exact plan digest, and follows independent remote verification.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import csv
+import ctypes
+import fcntl
+import hashlib
+from importlib import metadata
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+ORG = "sulliwood"
+FOLDER = "GFTB Stuff"
+SSD_ROOT = Path("/Volumes/TinylandSSD/tinyland/gftb-photos")
+PHOTO_EXTENSIONS = {".heic", ".heif", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+RETIRABLE_DIRS = {"originals", "webp", "webp-prev2", "webp-unrotated", "tmp"}
+RECIPE = {"version": 1, "quality": 80, "long_edge": 2000, "method": 6,
+          "metadata": "none", "orientation": "decoder-and-exif-transpose"}
+FOLDER_MIME = "application/vnd.google-apps.folder"
+MAX_FILES = 10000
+MAX_BYTES = 64 * 1024 ** 3
+
+
+class Refusal(RuntimeError):
+    """An unsafe or unverified operation was refused before further writes."""
+
+
+class IncompleteStage(Refusal):
+    """Journal-owned partial bytes must be preserved under their existing name."""
+
+
+def canonical(value):
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode()
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def relative(value):
+    p = PurePosixPath(value)
+    if (not value or p.is_absolute() or str(p) != value or
+            any(part in {"", ".", ".."} for part in p.parts) or
+            "\x00" in value or "\\" in value):
+        raise Refusal("invalid relative path")
+    return p
+
+
+def fingerprint(st):
+    return {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+
+
+def hash_file(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as f:
+        before = os.fstat(f.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise Refusal("source is not a regular file")
+        h = hashlib.sha256()
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+        after = os.fstat(f.fileno())
+    if fingerprint(before) != fingerprint(after):
+        raise Refusal("source changed while hashing")
+    return {"sha256": h.hexdigest(), "fingerprint": fingerprint(after)}
+
+
+def assert_source(path, expected):
+    actual = hash_file(path)
+    if actual != expected:
+        raise Refusal("source content or identity changed; create a new plan")
+
+
+def snapshot(source, expected, destination):
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as src, Path(destination).open("xb") as dst:
+        before = fingerprint(os.fstat(src.fileno()))
+        if before != expected["fingerprint"]:
+            raise Refusal("source identity changed before private snapshot")
+        h = hashlib.sha256()
+        for block in iter(lambda: src.read(1024 * 1024), b""):
+            h.update(block)
+            dst.write(block)
+        if fingerprint(os.fstat(src.fileno())) != before or h.hexdigest() != expected["sha256"]:
+            raise Refusal("source changed while creating private snapshot")
+    Path(destination).chmod(0o400)
+
+
+@contextlib.contextmanager
+def anchored_parent(root_fd, path, create=False):
+    """Walk only below an already-open root; reject every symlink component."""
+    parts = relative(path).parts
+    fd = os.dup(root_fd)
+    device = os.fstat(root_fd).st_dev
+    try:
+        for part in parts[:-1]:
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if os.fstat(fd).st_dev != device:
+                raise Refusal("path traverses a different filesystem")
+        yield fd, parts[-1]
+    finally:
+        os.close(fd)
+
+
+def hash_at(parent, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+    with os.fdopen(fd, "rb") as f:
+        before = os.fstat(f.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise Refusal("retirement source is not a regular file")
+        sha = hashlib.file_digest(f, "sha256").hexdigest()
+        after = os.fstat(f.fileno())
+    if fingerprint(before) != fingerprint(after):
+        raise Refusal("retirement source changed during hash verification")
+    return {"sha256": sha, "fingerprint": fingerprint(after)}
+
+
+def rename_noreplace(src, dst, src_fd, dst_fd):
+    """Atomic no-clobber publication. Unsupported filesystems fail closed."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        name, flag = "renameatx_np", 4  # Darwin RENAME_EXCL
+    else:
+        name, flag = "renameat2", 1  # Linux RENAME_NOREPLACE
+    fn = getattr(libc, name, None)
+    if fn is None:
+        raise Refusal("atomic no-replace rename is unavailable")
+    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                   ctypes.c_char_p, ctypes.c_uint]
+    fn.restype = ctypes.c_int
+    if fn(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), flag):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+
+
+def private_dir(path):
+    path = Path(path).absolute()
+    for parent in reversed([path, *path.parents]):
+        if parent.is_symlink():
+            raise Refusal("private state path traverses a symlink")
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    st = path.stat()
+    if st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
+        raise Refusal("state directory must be owned by this user with mode 0700")
+    return path
+
+
+class State:
+    def __init__(self, root):
+        self.root = private_dir(root)
+
+    @contextlib.contextmanager
+    def locked(self):
+        fd = os.open(self.root / "lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Refusal("another photos command holds the state lock") from None
+            yield
+        finally:
+            os.close(fd)
+
+    def save(self, plan):
+        data = canonical(plan)
+        key = hashlib.sha256(data).hexdigest()
+        path = self.root / f"plan-{key}.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        self.event(key, "planned", entries=len(plan["entries"]))
+        return key
+
+    def load(self, key):
+        if not re.fullmatch(r"[a-f0-9]{64}", key):
+            raise Refusal("plan must be its full SHA256 digest")
+        path = self.root / f"plan-{key}.json"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o277:
+                raise Refusal("plan must be private and read-only")
+            raw = f.read()
+        if hashlib.sha256(raw).hexdigest() != key:
+            raise Refusal("immutable plan digest mismatch")
+        plan = json.loads(raw)
+        if plan.get("version") != 1 or plan.get("org") != ORG:
+            raise Refusal("unsupported plan version or org")
+        return plan
+
+    def event(self, key, action, **values):
+        row = {"plan": key, "at": time.time(), "event": action, **values}
+        fd = os.open(self.root / f"journal-{key}.jsonl",
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "ab") as f:
+            f.write(canonical(row))
+            f.flush()
+            os.fsync(f.fileno())
+
+    def events(self, key):
+        path = self.root / f"journal-{key}.jsonl"
+        if not path.exists():
+            return []
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "r") as f:
+            try:
+                rows = [json.loads(line) for line in f]
+            except json.JSONDecodeError:
+                raise Refusal("journal has a partial record; reconcile before continuing") from None
+        if any(row.get("plan") != key for row in rows):
+            raise Refusal("journal plan mismatch")
+        return rows
+
+
+def safe_name(value):
+    if len(relative(value).parts) != 1:
+        raise Refusal("Drive name cannot be represented safely on this filesystem")
+    return value
+
+
+class RcloneRemote:
+    """ID-aware adapter. See https://rclone.org/drive/#query and #copyid."""
+    def __init__(self, config, state, sock, binary="rclone"):
+        self.config, self.state, self.sock, self.binary = str(config), state, str(sock), binary
+
+    def run(self, *args):
+        cmd = [self.binary, *map(str, args), "--config", self.config,
+               "--log-level", "ERROR", "--retries", "1", "--low-level-retries", "1",
+               "--timeout", "30s", "--contimeout", "15s", "--transfers", "1",
+               "--checkers", "1", "--multi-thread-streams", "0"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
+        except subprocess.TimeoutExpired:
+            raise Refusal("rclone exceeded its operation deadline") from None
+        if result.returncode:
+            # Never echo argv, stderr or rendered config: all can carry auth context.
+            raise Refusal(f"rclone {args[0]} failed with exit {result.returncode}")
+        return result.stdout
+
+    @staticmethod
+    def quote(value):
+        return value.replace("\\", "\\\\").replace("'", "\\'")
+
+    def query(self, query):
+        rows = json.loads(self.run("backend", "query", f"gdrive-{ORG}:", query))
+        if not isinstance(rows, list):
+            raise Refusal("unexpected Drive query response")
+        return rows
+
+    def children(self, folder):
+        return self.query(f"'{self.quote(folder)}' in parents and trashed = false")
+
+    def root_folder(self):
+        found = self.query(f"'root' in parents and name = '{self.quote(FOLDER)}' "
+                           f"and mimeType = '{FOLDER_MIME}' and trashed = false")
+        if len(found) != 1:
+            raise Refusal("GFTB Stuff root folder is missing or ambiguous by Drive ID")
+        return found[0]["id"]
+
+    def inventory(self, folder):
+        result, pending, seen = [], [(folder, "", 0)], set()
+        while pending:
+            parent, prefix, depth = pending.pop(0)
+            if depth > 16 or parent in seen:
+                raise Refusal("Drive folder tree is cyclic or exceeds depth limit")
+            seen.add(parent)
+            children = self.children(parent)
+            quarantine_names = [r for r in children if r.get("name", "").casefold() == ".gdm-retired"]
+            if quarantine_names and (len(quarantine_names) != 1 or quarantine_names[0].get("name") != ".gdm-retired" or quarantine_names[0].get("mimeType") != FOLDER_MIME):
+                raise Refusal("reserved quarantine name is a shortcut, file, or ambiguous folder")
+            for obj in children:
+                name = safe_name(obj["name"])
+                if name == ".gdm-retired":
+                    continue
+                path = f"{prefix}/{name}" if prefix else name
+                row = {k: obj.get(k) for k in
+                       ("id", "name", "mimeType", "size", "md5Checksum",
+                        "sha256Checksum", "modifiedTime")}
+                row.update(path=path, parent=parent)
+                result.append(row)
+                if obj.get("mimeType") == FOLDER_MIME:
+                    pending.append((obj["id"], path, depth + 1))
+                if len(result) > MAX_FILES:
+                    raise Refusal("Drive inventory exceeds bounded file budget")
+        return sorted(result, key=lambda r: (r["path"], r["id"]))
+
+    def current(self, row):
+        found = [r for r in self.children(row["parent"]) if r.get("id") == row["id"]]
+        if len(found) != 1:
+            raise Refusal("planned Drive object changed parent or disappeared")
+        obj = found[0]
+        for name in ("name", "size", "md5Checksum", "modifiedTime"):
+            if obj.get(name) != row.get(name):
+                raise Refusal("Drive object fingerprint changed; create a new plan")
+        return obj
+
+    def download(self, row, destination):
+        self.current(row)
+        self.run("backend", "copyid", f"gdrive-{ORG}:", row["id"], str(destination), "--immutable")
+        self.current(row)
+
+    def sha256(self, row):
+        self.current(row)
+        # Read back by ID even when Drive advertises hashes: this also proves
+        # independent transport durability and avoids pathname deduplication.
+        with tempfile.TemporaryDirectory(prefix="readback-", dir=self.state.root) as temp:
+            target = Path(temp) / "object"
+            self.download(row, target)
+            return hash_file(target)["sha256"]
+
+    def uploads_empty(self):
+        data = json.loads(self.run("rc", "--unix-socket", self.sock, "vfs/stats"))
+        if not isinstance(data, dict):
+            raise Refusal("VFS upload evidence is not an object")
+        cache = data.get("diskCache", {})
+        required = ("uploadsQueued", "uploadsInProgress", "erroredFiles")
+        if not isinstance(cache, dict) or any(type(cache.get(name)) is not int or cache[name] < 0 for name in required):
+            raise Refusal("VFS upload queue evidence must contain nonnegative integer counts")
+        if type(cache.get("outOfSpace")) is not bool:
+            raise Refusal("VFS out-of-space evidence is unavailable or malformed")
+        if any(cache[name] for name in required) or cache["outOfSpace"]:
+            raise Refusal("VFS uploads have not drained; run verify again after drainage")
+
+    def retire(self, row, key):
+        self.current(row)
+        name = f"{row['id']}-{safe_name(row['name'])}"
+        original_parent_path = PurePosixPath(row["path"]).parent
+        root = self.root_folder()
+        if str(original_parent_path) == ".":
+            if row["parent"] != root:
+                raise Refusal("original retirement parent is not the planned Drive root")
+        else:
+            parents = [r for r in self.inventory(root) if r["path"] == str(original_parent_path) and r["mimeType"] == FOLDER_MIME]
+            if len(parents) != 1 or parents[0]["id"] != row["parent"]:
+                raise Refusal("original retirement parent ID or path changed")
+        prefix = "" if str(original_parent_path) == "." else str(original_parent_path)
+        parent = self.quarantine_parent(key, row["parent"], prefix)
+        if any(r.get("name", "").casefold() == name.casefold() for r in self.children(parent)):
+            raise Refusal("Drive quarantine destination already exists")
+        path = original_parent_path / ".gdm-retired" / key / name
+        destination = f"gdrive-{ORG}:{FOLDER}/{path}"
+        self.run("backend", "moveid", f"gdrive-{ORG}:", row["id"], destination, "--immutable")
+
+    def quarantine_parent(self, key, parent=None, prefix=""):
+        parent = parent or self.root_folder()
+        parts = []
+        for name in (".gdm-retired", key):
+            parts.append(name)
+            found = [r for r in self.children(parent) if r.get("name", "").casefold() == name.casefold()]
+            if not found:
+                destination = PurePosixPath(FOLDER) / prefix / PurePosixPath(*parts)
+                self.run("mkdir", f"gdrive-{ORG}:{destination}")
+                found = [r for r in self.children(parent) if r.get("name", "").casefold() == name.casefold()]
+            if len(found) != 1 or found[0].get("mimeType") != FOLDER_MIME or found[0]["name"] != name:
+                raise Refusal("Drive quarantine folder is missing, a shortcut, or ambiguous")
+            parent = found[0]["id"]
+        return parent
+
+    def rename(self, row, destination):
+        """Rename in the existing parent, preserving the unique original ID."""
+        self.current(row)
+        if PurePosixPath(destination).parent != PurePosixPath(row["path"]).parent:
+            raise Refusal("original reconciliation must be a sibling rename")
+        name = PurePosixPath(destination).name
+        if any(r.get("name", "").casefold() == name.casefold() for r in self.children(row["parent"])):
+            raise Refusal("original rename destination already exists")
+        self.run("backend", "moveid", f"gdrive-{ORG}:", row["id"],
+                 f"gdrive-{ORG}:{FOLDER}/{destination}", "--immutable")
+
+    def refresh(self, path):
+        self.run("rc", "--unix-socket", self.sock, "vfs/refresh",
+                 f"dir={FOLDER}/{path}" if path != "." else f"dir={FOLDER}", "recursive=false")
+
+    def retired(self, row, key):
+        parent = row["parent"]
+        for name in (".gdm-retired", key):
+            found = [r for r in self.children(parent) if r.get("name", "").casefold() == name.casefold()]
+            if not found:
+                return None
+            if len(found) != 1 or found[0].get("name") != name or found[0].get("mimeType") != FOLDER_MIME:
+                raise Refusal("recoverable Drive quarantine folder is ambiguous")
+            parent = found[0]["id"]
+        found = [r for r in self.children(parent) if r.get("id") == row["id"]]
+        if not found:
+            return None
+        if len(found) != 1 or found[0]["name"] != f"{row['id']}-{row['name']}":
+            raise Refusal("quarantined Drive object identity is unexpected")
+        result = dict(found[0])
+        path = PurePosixPath(row["path"]).parent / ".gdm-retired" / key / result["name"]
+        result.update(parent=parent, path=str(path))
+        return result
+
+
+class MountedIO:
+    """Directory-FD anchored publication; mount detachment cannot write shadows."""
+    def __init__(self, point):
+        self.point = Path(point)
+        self.fd = None
+        self.device = None
+        self.table_line = None
+        self.inode = None
+        self.pid = None
+
+    def daemon_pid(self):
+        result = subprocess.run(["/bin/launchctl", "list", f"dev.tinyland.gdrive-mounts.{ORG}-root"],
+                                capture_output=True, text=True, check=True, timeout=10)
+        found = re.search(r'"PID"\s*=\s*(\d+)', result.stdout)
+        if not found:
+            raise Refusal("mount daemon PID is unavailable")
+        return int(found[1])
+
+    def table(self):
+        result = subprocess.run(["/sbin/mount"], capture_output=True, text=True,
+                                check=True, timeout=10)
+        needle = f" on {self.point} ("
+        lines = [line for line in result.stdout.splitlines() if needle in line]
+        if len(lines) != 1 or "read-only" in lines[0] or "(nfs," not in lines[0]:
+            raise Refusal("the exact writable NFS mount is absent")
+        return lines[0]
+
+    def check(self):
+        if self.table() != self.table_line:
+            raise Refusal("mount identity changed during the operation")
+        if self.fd is not None and os.fstat(self.fd).st_dev != self.device:
+            raise Refusal("mount filesystem identity changed")
+        if self.fd is not None:
+            current = os.stat(self.point, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (self.device, self.inode) or self.daemon_pid() != self.pid:
+                raise Refusal("current mount generation changed")
+
+    def __enter__(self):
+        self.table_line = self.table()
+        nfs = subprocess.run(["/usr/sbin/nfsstat", "-m"], capture_output=True,
+                             text=True, check=True, timeout=10).stdout
+        section = nfs.split(str(self.point), 1)
+        if len(section) != 2:
+            raise Refusal("negotiated NFS options are unavailable")
+        options = section[1].split("\n\n", 1)[0]
+        if not re.search(r"\bsoft\b", options) or re.search(r"\b(?:nointr|not responding)\b", options):
+            raise Refusal("NFS must have responsive, interruptible soft semantics before photo I/O")
+        self.fd = os.open(self.point, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.device = os.fstat(self.fd).st_dev
+        self.inode = os.fstat(self.fd).st_ino
+        self.pid = self.daemon_pid()
+        if self.device == self.point.parent.stat().st_dev:
+            self.__exit__(None, None, None)
+            raise Refusal("mountpoint is a local shadow")
+        self.check()
+        return self
+
+    def __exit__(self, *_):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    @contextlib.contextmanager
+    def parent(self, path, create=False):
+        parts = relative(f"{FOLDER}/{path}").parts
+        self.check()
+        fd = os.dup(self.fd)
+        try:
+            for part in parts[:-1]:
+                self.check()
+                if create and part != FOLDER:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
+                if os.fstat(fd).st_dev != self.device:
+                    raise Refusal("publication path escaped the mounted filesystem")
+            yield fd, parts[-1]
+        finally:
+            os.close(fd)
+
+    def read_to(self, path, destination, expected_sha):
+        with self.parent(path) as (parent, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            with os.fdopen(fd, "rb") as source, Path(destination).open("xb") as target:
+                before = fingerprint(os.fstat(source.fileno()))
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise Refusal("mounted original is not a regular file")
+                h = hashlib.sha256()
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    self.check()
+                    h.update(block)
+                    target.write(block)
+                self.check()
+                if fingerprint(os.fstat(source.fileno())) != before or h.hexdigest() != expected_sha:
+                    raise Refusal("mounted original does not match its planned ID-resolved bytes")
+        Path(destination).chmod(0o400)
+
+    def stage(self, source, path, expected):
+        """Write only a journal-owned unpredictable staging name on NFS.
+
+        NFS cannot guarantee exclusive CREATE or exclusive rename on this
+        backend. This never touches a canonical filename, never truncates an
+        existing file, and claims no atomic no-clobber property. The subsequent
+        drained-queue, unique Drive ID + SHA256 checks authorize promotion.
+        """
+        if not re.fullmatch(r"\.gdm-stage-[a-f0-9]{32}\.tmp", PurePosixPath(path).name):
+            raise Refusal("staging requires a journal-owned unpredictable UUID name")
+        assert_source(source, expected)
+        with self.parent(path, create=True) as (parent, name):
+            try:
+                current = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            except FileNotFoundError:
+                current = None
+            if current is not None:
+                with os.fdopen(current, "rb") as f:
+                    value = hashlib.file_digest(f, "sha256").hexdigest()
+                if value != expected["sha256"]:
+                    raise IncompleteStage("interrupted staging bytes differ; preserve the recorded staging ID")
+                self.check()
+                return "stage-reused"
+            # Deliberately no O_TRUNC, no final-path write, and no claim that
+            # O_EXCL works on Apple's NFS client / go-nfs server combination.
+            fd = os.open(name, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            with os.fdopen(fd, "wb") as target:
+                if os.fstat(target.fileno()).st_size:
+                    raise Refusal("staging namespace collision; existing bytes preserved")
+                source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(source_fd, "rb") as original:
+                    before = fingerprint(os.fstat(original.fileno()))
+                    h = hashlib.sha256()
+                    for block in iter(lambda: original.read(1024 * 1024), b""):
+                        self.check()
+                        h.update(block)
+                        target.write(block)
+                    after = fingerprint(os.fstat(original.fileno()))
+                if before != expected["fingerprint"] or before != after or h.hexdigest() != expected["sha256"]:
+                    raise Refusal("source changed while writing mounted staging bytes")
+                target.flush()
+                os.fsync(target.fileno())
+                self.check()
+            return "staged"
+
+    def publish(self, source, path, expected, temporary=None):
+        assert_source(source, expected)
+        with self.parent(path, create=True) as (parent, name):
+            try:
+                current = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            except FileNotFoundError:
+                current = None
+            if current is not None:
+                with os.fdopen(current, "rb") as f:
+                    h = hashlib.file_digest(f, "sha256").hexdigest()
+                if h == expected["sha256"]:
+                    return "reused"
+                raise Refusal("publication destination exists with different bytes")
+            temporary = temporary or f".gdm-photo-{uuid.uuid4().hex}.tmp"
+            safe_name(temporary)
+            if not temporary.startswith(".gdm-photo-") or not temporary.endswith(".tmp"):
+                raise Refusal("temporary name is not owned by the photo journal")
+            try:
+                prior = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            except FileNotFoundError:
+                prior = None
+            if prior is not None:
+                with os.fdopen(prior, "rb") as existing:
+                    if hashlib.file_digest(existing, "sha256").hexdigest() != expected["sha256"]:
+                        raise Refusal("interrupted temporary has incomplete bytes; preserve for explicit reconciliation")
+                self.check()
+                rename_noreplace(temporary, name, parent, parent)
+                self.check()
+                return "published"
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                         0o600, dir_fd=parent)
+            # Any failure preserves this journal-owned temporary. EIO/rename
+            # failure is ambiguous; cleanup must follow reconciliation.
+            with os.fdopen(fd, "wb") as target:
+                source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(source_fd, "rb") as original:
+                    before = fingerprint(os.fstat(original.fileno()))
+                    h = hashlib.sha256()
+                    for block in iter(lambda: original.read(1024 * 1024), b""):
+                        self.check()
+                        target.write(block)
+                        h.update(block)
+                    after = fingerprint(os.fstat(original.fileno()))
+                if before != expected["fingerprint"] or before != after or h.hexdigest() != expected["sha256"]:
+                    raise Refusal("source changed during mounted publication")
+                target.flush()
+                os.fsync(target.fileno())
+            self.check()
+            rename_noreplace(temporary, name, parent, parent)
+            self.check()
+            return "published"
+
+
+def validate_webp(path):
+    from PIL import Image
+    with Image.open(path) as im:
+        if im.format != "WEBP" or getattr(im, "n_frames", 1) != 1:
+            raise Refusal("adopted output is not a single-frame WebP")
+        im.load()
+        if max(im.size) > RECIPE["long_edge"]:
+            raise Refusal("adopted output exceeds the agreed 2000px limit")
+        if im.info.get("exif") or im.info.get("xmp") or im.info.get("icc_profile"):
+            raise Refusal("adopted WebP retains metadata; review before adoption")
+        return {"width": im.width, "height": im.height}
+
+
+def convert(source, destination):
+    from PIL import Image, ImageOps
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    with Image.open(source) as image:
+        image = ImageOps.exif_transpose(image)
+        image.thumbnail((RECIPE["long_edge"], RECIPE["long_edge"]), Image.Resampling.LANCZOS)
+        image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+        image.save(destination, "WEBP", quality=RECIPE["quality"], method=RECIPE["method"])
+    validate_webp(destination)
+
+
+def codec_versions():
+    versions = {}
+    for package in ("Pillow", "pillow-heif"):
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = "unavailable"
+    try:
+        from PIL import features
+        versions["libwebp"] = features.version("webp")
+    except ImportError:
+        versions["libwebp"] = "unavailable"
+    return versions
+
+
+def local_inventory(root):
+    root = Path(root)
+    if root.is_symlink() or root.resolve() != root.absolute():
+        raise Refusal("SSD source root must be a real directory without symlink ancestors")
+    result, total = {}, 0
+    for base, dirs, files in os.walk(root, followlinks=False):
+        relbase = Path(base).relative_to(root)
+        dirs[:] = sorted(d for d in dirs if d != ".gdm-retired")
+        if len(relbase.parts) > 4:
+            raise Refusal("SSD source tree exceeds bounded depth")
+        for name in dirs:
+            if (Path(base) / name).is_symlink():
+                raise Refusal("SSD source tree contains a directory symlink")
+        for name in sorted(files):
+            path = Path(base) / name
+            rel = path.relative_to(root).as_posix()
+            relative(rel)
+            st = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                raise Refusal("local source is not a regular file")
+            total += st.st_size
+            if len(result) >= MAX_FILES or total > MAX_BYTES:
+                raise Refusal("SSD corpus exceeds the bounded inventory budget")
+            value = hash_file(path)
+            result[rel] = value
+    return result
+
+
+def unique_path(desired, sha, occupied):
+    relative(desired)
+    key = desired.casefold()
+    if key not in occupied:
+        occupied.add(key)
+        return desired
+    p = PurePosixPath(desired)
+    for length in (12, 20, 64):
+        candidate = str(p.with_name(f"{p.stem}-{sha[:length]}{p.suffix}"))
+        if candidate.casefold() not in occupied:
+            occupied.add(candidate.casefold())
+            return candidate
+    raise Refusal("content-addressed destination is still ambiguous")
+
+
+def make_plan(source_root, mount_point, remote, validator=validate_webp):
+    source_root = Path(source_root)
+    local = local_inventory(source_root)
+    if not any(p.startswith("originals/") for p in local):
+        raise Refusal("SSD corpus has no staged originals")
+    root_id = remote.root_folder()
+    inventory = remote.inventory(root_id)
+    dirs = {}
+    for row in inventory:
+        if row["mimeType"] == FOLDER_MIME:
+            dirs.setdefault(row["path"].casefold(), []).append(row)
+    if any(len(rows) != 1 for rows in dirs.values()):
+        raise Refusal("duplicate Drive directory names require explicit reconciliation")
+    files = [r for r in inventory if r["mimeType"] != FOLDER_MIME]
+    if any(PurePosixPath(r["path"]).name.startswith(".gdm-stage-") for r in files):
+        raise Refusal("unreconciled staging objects exist; resume their existing private plan")
+    by_path, hashes, remote_bytes = {}, {}, 0
+    for row in files:
+        by_path.setdefault(row["path"].casefold(), []).append(row)
+        if row["mimeType"] == "application/vnd.google-apps.shortcut":
+            raise Refusal("Drive shortcuts require an explicit provenance decision")
+        if row["mimeType"].startswith("application/vnd.google-apps."):
+            continue  # Preserve native documents and shortcuts; never follow them.
+        remote_bytes += int(row.get("size") or 0)
+        if remote_bytes > MAX_BYTES:
+            raise Refusal("Drive corpus exceeds the bounded readback byte budget")
+        hashes[row["id"]] = remote.sha256(row)
+    originals = [r for r in files if not r["path"].startswith("webp/") and r["id"] in hashes]
+    blockers = []
+    for rows in by_path.values():
+        sources = [r for r in rows if r in originals]
+        if not sources:
+            continue
+        counts = {}
+        for row in sources:
+            counts[hashes[row["id"]]] = counts.get(hashes[row["id"]], 0) + 1
+        first_sha = hashes[min(sources, key=lambda r: r["id"])["id"]]
+        if any(sha != first_sha and count > 1 for sha, count in counts.items()):
+            blockers.append("multiple duplicated content groups share one original pathname; reconcile those IDs before mount reads")
+    groups = {}
+    for row in originals:
+        groups.setdefault(hashes[row["id"]], {"remote": [], "local": []})["remote"].append(row)
+    for path, data in local.items():
+        if path.startswith("originals/"):
+            groups.setdefault(data["sha256"], {"remote": [], "local": []})["local"].append(path)
+    occupied = {row["path"].casefold() for row in inventory}
+    entries, retirement, warnings = [], {}, []
+    original_entries = []
+    for sha, group in sorted(groups.items()):
+        group["remote"].sort(key=lambda r: (r["path"], r["id"]))
+        group["local"].sort()
+        keeper = group["remote"][0] if group["remote"] else None
+        local_path = group["local"][0] if group["local"] else None
+        wanted = keeper["path"] if keeper else str(PurePosixPath(local_path).relative_to("originals"))
+        # Keep one stable Drive ID at a colliding name; rename other distinct
+        # originals by ID into sibling content-suffixed paths. Unique IDs are
+        # never retired: sharing and references continue to identify those bytes.
+        at_name = sorted(by_path.get(wanted.casefold(), []), key=lambda r: r["id"])
+        keep_name = keeper and at_name and keeper["id"] == at_name[0]["id"]
+        target = wanted if keep_name else unique_path(wanted, sha, occupied)
+        entry = {"kind": "original", "path": target, "sha256": sha,
+                 "recipe": {"operation": "preserve-original-bytes"},
+                 "source": {"local": local_path, "remote": keeper},
+                 "keep_id": keeper["id"] if keeper else None,
+                 "rename_from": keeper if keeper and not keep_name else None}
+        entry["key"] = digest(entry)
+        entries.append(entry)
+        original_entries.append((entry, group))
+        for row in group["remote"]:
+            if row["id"] != entry["keep_id"]:
+                retirement[row["id"]] = {"row": row, "sha256": sha, "reason": "verified-original-copy",
+                                         "canonical_key": entry["key"]}
+    for original, group in original_entries:
+        if PurePosixPath(original["path"]).suffix.lower() not in PHOTO_EXTENSIONS:
+            continue  # Preserve videos, Live Photo companions and sidecars unchanged.
+        candidates = []
+        for source in group["local"]:
+            candidate = str(PurePosixPath("webp") / PurePosixPath(source).relative_to("originals").with_suffix(".webp"))
+            if candidate in local:
+                candidates.append(candidate)
+        candidate_hashes = {local[c]["sha256"] for c in candidates}
+        if len(candidate_hashes) > 1:
+            raise Refusal("same original has conflicting corrected WebP candidates")
+        adopted = sorted(candidates)[0] if candidates else None
+        if adopted:
+            # Same-stem, different-original formats cannot claim one derivative.
+            stems = [p for p in local if p.startswith("originals/") and PurePosixPath(p).suffix.lower() in PHOTO_EXTENSIONS and
+                     str(PurePosixPath("webp") / PurePosixPath(p).relative_to("originals").with_suffix(".webp")) == adopted]
+            if len({local[p]["sha256"] for p in stems}) != 1:
+                raise Refusal("same-stem source collision makes adopted WebP provenance ambiguous")
+            dimensions = validator(source_root / adopted)
+            sha = local[adopted]["sha256"]
+            wanted = adopted
+            recipe = {**RECIPE, "operation": "adopt-corrected-webp", **dimensions,
+                      "source_original_sha256": original["sha256"]}
+        else:
+            sha = None
+            wanted = str(PurePosixPath("webp") / PurePosixPath(original["path"]).with_suffix(".webp"))
+            recipe = {**RECIPE, "operation": "encode-original",
+                      "source_original_sha256": original["sha256"], "codec_versions": codec_versions()}
+        matches = [r for r in by_path.get(wanted.casefold(), []) if hashes.get(r["id"]) == sha]
+        keeper = min(matches, key=lambda r: r["id"]) if matches else None
+        target = wanted if keeper else unique_path(wanted, sha or digest(recipe), occupied)
+        entry = {"kind": "webp", "path": target, "sha256": sha, "recipe": recipe,
+                 "source": {"local": adopted, "remote": None},
+                 "original_key": original["key"], "keep_id": keeper["id"] if keeper else None}
+        entry["key"] = digest(entry)
+        entries.append(entry)
+        for row in by_path.get(wanted.casefold(), []):
+            if row["id"] in hashes and row["id"] != entry["keep_id"]:
+                retirement[row["id"]] = {"row": row, "sha256": hashes[row["id"]],
+                                         "reason": "superseded-webp", "canonical_key": entry["key"]}
+    for name in ("orientation-judged.csv", "design-picks.md"):
+        if name in local and f"webp/{name}" in local and local[name]["sha256"] != local[f"webp/{name}"]["sha256"]:
+            blockers.append(f"conflicting provenance copies: {name}")
+        source = name if name in local else f"webp/{name}"
+        if source not in local:
+            warnings.append(f"missing provenance sidecar: {name}")
+            continue
+        wanted, sha = f"webp/{name}", local[source]["sha256"]
+        matches = [r for r in by_path.get(wanted.casefold(), []) if hashes.get(r["id"]) == sha]
+        keeper = min(matches, key=lambda r: r["id"]) if matches else None
+        entry = {"kind": "provenance", "path": wanted if keeper else unique_path(wanted, sha, occupied),
+                 "sha256": sha, "recipe": {"operation": "preserve-provenance-bytes"},
+                 "source": {"local": source, "remote": None},
+                 "keep_id": keeper["id"] if keeper else None}
+        entry["key"] = digest(entry)
+        entries.append(entry)
+    judged = source_root / "orientation-judged.csv"
+    if "orientation-judged.csv" in local:
+        with judged.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        names = {PurePosixPath(p).stem for p in local if p.startswith("originals/")}
+        extra = sorted(r["name"] for r in rows if r.get("name") not in names)
+        if extra:
+            warnings.append("orientation provenance contains non-source rows: " + ", ".join(extra))
+    covered = {e["sha256"] for e in entries if e["sha256"]}
+    local_retirement = [p for p in sorted(local) if PurePosixPath(p).parts[0] in RETIRABLE_DIRS
+                        and local[p]["sha256"] in covered]
+    unresolved = [{"path": p, "reason": "no verified canonical byte-equivalent; preserve locally"}
+                  for p in sorted(local) if PurePosixPath(p).parts[0] in RETIRABLE_DIRS and p not in local_retirement]
+    source_stat = source_root.stat()
+    return {"version": 1, "org": ORG, "created_at": time.time(), "source_root": str(source_root.absolute()),
+            "source_identity": {"dev": source_stat.st_dev, "ino": source_stat.st_ino},
+            "mount_point": str(Path(mount_point).absolute()), "drive_root_id": root_id,
+            "local": local, "remote_inventory": inventory, "entries": entries,
+            "retirement": sorted(retirement.values(), key=lambda r: r["row"]["id"]),
+            "local_retirement": local_retirement, "unresolved": unresolved,
+            "warnings": warnings, "blockers": blockers}
+
+
+@contextlib.contextmanager
+def materialized(entry, plan, remote, state, mount=None):
+    source = entry["source"]
+    if source["local"]:
+        path = Path(plan["source_root"]) / relative(source["local"])
+        with tempfile.TemporaryDirectory(prefix="snapshot-", dir=state.root) as temp:
+            target = Path(temp) / ("source" + path.suffix)
+            snapshot(path, plan["local"][source["local"]], target)
+            yield target
+    elif source["remote"]:
+        with tempfile.TemporaryDirectory(prefix="source-", dir=state.root) as temp:
+            path = Path(temp) / ("original" + PurePosixPath(entry["path"]).suffix)
+            if mount is None:
+                raise Refusal("original workload reads require the guarded mount")
+            mount.read_to(entry["path"], path, entry["sha256"])
+            if hash_file(path)["sha256"] != entry["sha256"]:
+                raise Refusal("Drive source no longer matches planned SHA256")
+            yield path
+    else:
+        raise Refusal("entry has no materializable source")
+
+
+def namespace(plan, remote):
+    if remote.root_folder() != plan["drive_root_id"]:
+        raise Refusal("GFTB Stuff Drive root identity changed")
+    current = remote.inventory(plan["drive_root_id"])
+    planned_dirs = {r["path"]: r["id"] for r in plan["remote_inventory"] if r["mimeType"] == FOLDER_MIME}
+    current_dirs = {}
+    for row in current:
+        if row["mimeType"] == "application/vnd.google-apps.shortcut":
+            raise Refusal("Drive namespace contains an unreviewed shortcut")
+        if row["mimeType"] == FOLDER_MIME:
+            current_dirs.setdefault(row["path"].casefold(), []).append(row)
+    guarded_paths = [e["path"] for e in plan["entries"]] + [r["row"]["path"] for r in plan["retirement"]]
+    for path in guarded_paths:
+        for parent in PurePosixPath(path).parents:
+            if str(parent) == ".":
+                continue
+            rows = current_dirs.get(str(parent).casefold(), [])
+            if len(rows) > 1:
+                raise Refusal("destination ancestor is ambiguous by Drive ID")
+            if str(parent) in planned_dirs and (len(rows) != 1 or rows[0]["id"] != planned_dirs[str(parent)]):
+                raise Refusal("destination ancestor Drive ID changed")
+    return current
+
+
+def apply_plan(plan, key, state, remote, mount, encoder=convert, validator=validate_webp):
+    if plan.get("blockers"):
+        raise Refusal("plan contains unresolved provenance decisions")
+    namespace(plan, remote)
+    remote.uploads_empty()
+    entries = {entry["key"]: entry for entry in plan["entries"]}
+    publications = []
+    with mount:
+        # Reconcile all same-name/different-byte originals before accessing their
+        # pathname view. These metadata-only API moves preserve each original ID.
+        for entry in plan["entries"]:
+            row = entry.get("rename_from")
+            if row is None:
+                continue
+            current = namespace(plan, remote)
+            found = [r for r in current if r["id"] == row["id"]]
+            if len(found) != 1 or remote.sha256(found[0]) != entry["sha256"]:
+                raise Refusal("original rename source changed")
+            if found[0]["path"] == entry["path"]:
+                state.event(key, "original-renamed", id=row["id"], path=entry["path"], reconciled=True)
+                continue
+            if found[0]["path"] != row["path"] or found[0]["parent"] != row["parent"]:
+                raise Refusal("original rename source moved outside the approved operation")
+            state.event(key, "original-rename-started", id=row["id"], path=entry["path"])
+            remote.rename(row, entry["path"])
+            after = [r for r in namespace(plan, remote) if r["id"] == row["id"]]
+            if len(after) != 1 or after[0]["path"] != entry["path"] or after[0]["parent"] != row["parent"] or remote.sha256(after[0]) != entry["sha256"]:
+                raise Refusal("original ID-preserving rename requires reconciliation")
+            remote.refresh(str(PurePosixPath(entry["path"]).parent))
+            state.event(key, "original-renamed", id=row["id"], path=entry["path"])
+        for entry in plan["entries"]:
+            namespace(plan, remote)
+            if entry["keep_id"]:
+                if entry["kind"] == "original":
+                    with tempfile.TemporaryDirectory(prefix="mount-proof-", dir=state.root) as temp:
+                        mount.read_to(entry["path"], Path(temp) / "original", entry["sha256"])
+                state.event(key, "kept", entry=entry["key"], remote_id=entry["keep_id"])
+                continue
+            with contextlib.ExitStack() as stack:
+                if entry["kind"] == "webp" and not entry["source"]["local"]:
+                    if entry["recipe"]["codec_versions"] != codec_versions():
+                        raise Refusal("encoder library versions changed since planning")
+                    original = entries[entry["original_key"]]
+                    source = stack.enter_context(materialized(original, plan, remote, state, mount))
+                    source_before = hash_file(source)
+                    temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="encode-", dir=state.root))
+                    path = Path(temp) / "output.webp"
+                    encoder(source, path)
+                    assert_source(source, source_before)
+                    validator(path)
+                    expected = hash_file(path)
+                else:
+                    path = stack.enter_context(materialized(entry, plan, remote, state, mount))
+                    if entry["kind"] == "webp":
+                        validator(path)
+                    expected = hash_file(path)
+                    if expected["sha256"] != entry["sha256"]:
+                        raise Refusal("materialized bytes differ from planned SHA256")
+                # Persist output identity BEFORE publication: a crash after rename
+                # can then be reconciled independently without trusting filenames.
+                previous = [e for e in state.events(key) if e.get("event") == "prepared" and
+                            e.get("entry") == entry["key"]]
+                if previous and previous[-1]["sha256"] != expected["sha256"]:
+                    raise Refusal("encoder output changed across resume; create a new plan")
+                state.event(key, "prepared", entry=entry["key"], sha256=expected["sha256"],
+                            recipe=digest(entry["recipe"]))
+                intents = [e for e in state.events(key) if e.get("event") == "stage-intent" and e.get("entry") == entry["key"]]
+                stage_path = intents[-1]["path"] if intents else str(PurePosixPath(entry["path"]).with_name(f".gdm-stage-{uuid.uuid4().hex}.tmp"))
+                current = namespace(plan, remote)
+                known = [e for e in state.events(key) if e.get("event") in {"stage-verified", "promoted"}
+                         and e.get("entry") == entry["key"]]
+                finals = [r for r in current if r["path"].casefold() == entry["path"].casefold()]
+                if finals:
+                    if len(finals) != 1 or not known or finals[0]["id"] != known[-1]["id"] or remote.sha256(finals[0]) != expected["sha256"]:
+                        raise Refusal("canonical destination is occupied by an unapproved or ambiguous ID")
+                    state.event(key, "promoted", entry=entry["key"], id=finals[0]["id"],
+                                sha256=expected["sha256"], path=entry["path"], reconciled=True)
+                    continue
+                stages = [r for r in current if r["path"].casefold() == stage_path.casefold()]
+                if len(stages) > 1 or (known and stages and stages[0]["id"] != known[-1]["id"]):
+                    raise Refusal("staging name resolves to ambiguous or substituted Drive IDs")
+                state.event(key, "stage-intent", entry=entry["key"], path=stage_path,
+                            target=entry["path"], sha256=expected["sha256"])
+                try:
+                    outcome = mount.stage(path, stage_path, expected)
+                except IncompleteStage:
+                    # Never truncate, unlink or overwrite a partial NFS write.
+                    # A fresh unpredictable sibling resumes useful work while
+                    # the exact old name/ID remains on the private evidence list.
+                    current = namespace(plan, remote)
+                    old = [r for r in current if r["path"] == stage_path]
+                    if len(old) > 1:
+                        raise Refusal("incomplete staging name has ambiguous Drive IDs")
+                    state.event(key, "incomplete-stage-preserved", entry=entry["key"], path=stage_path,
+                                ids=[r["id"] for r in old])
+                    stage_path = str(PurePosixPath(entry["path"]).with_name(f".gdm-stage-{uuid.uuid4().hex}.tmp"))
+                    state.event(key, "stage-intent", entry=entry["key"], path=stage_path,
+                                target=entry["path"], sha256=expected["sha256"])
+                    outcome = mount.stage(path, stage_path, expected)
+                state.event(key, outcome, entry=entry["key"], path=stage_path, sha256=expected["sha256"])
+                publications.append((entry, expected["sha256"], stage_path))
+    # One bounded check, no waiting or polling. A pending upload leaves all
+    # staged bytes and intent durable; the same apply command safely resumes.
+    remote.uploads_empty()
+    for entry, expected_sha, stage_path in publications:
+        current = namespace(plan, remote)
+        found = [r for r in current if r["path"].casefold() == stage_path.casefold()]
+        if len(found) != 1 or found[0]["path"] != stage_path:
+            raise Refusal("uploaded staging object is missing or ambiguous by Drive ID")
+        row = found[0]
+        if remote.sha256(row) != expected_sha:
+            raise Refusal("uploaded staging bytes failed independent Drive SHA256 verification")
+        state.event(key, "stage-verified", entry=entry["key"], id=row["id"],
+                    sha256=expected_sha, path=stage_path, parent=row["parent"], target=entry["path"])
+        current = namespace(plan, remote)
+        if any(r["path"].casefold() == entry["path"].casefold() for r in current):
+            raise Refusal("final destination was created concurrently; preserve staging and all existing IDs")
+        state.event(key, "promotion-started", entry=entry["key"], id=row["id"], path=entry["path"],
+                    sha256=expected_sha, parent=row["parent"])
+        remote.rename(row, entry["path"])
+        after = [r for r in namespace(plan, remote) if r["path"].casefold() == entry["path"].casefold()]
+        if len(after) != 1 or after[0]["id"] != row["id"] or after[0]["parent"] != row["parent"] or after[0]["path"] != entry["path"] or remote.sha256(after[0]) != expected_sha:
+            raise Refusal("promotion identity, parent, name or bytes are ambiguous; preserve all IDs for reconciliation")
+        remote.refresh(str(PurePosixPath(entry["path"]).parent))
+        state.event(key, "promoted", entry=entry["key"], id=row["id"],
+                    sha256=expected_sha, path=entry["path"])
+    return len(plan["entries"])
+
+
+def journaled_canonical(entry, expected_sha, events):
+    """Bind new canonical bytes to the staged Drive ID and approved target.
+
+    A completed promotion receipt is sufficient only with its staged-ID proof.
+    A promotion-started receipt plus the same proof also permits read-only
+    reconciliation after a successful move whose final receipt was interrupted.
+    """
+    intents, staged, candidates = {}, {}, {}
+    for event in events:
+        if event.get("entry") != entry["key"]:
+            continue
+        action = event.get("event")
+        if action == "stage-intent" and event.get("sha256") == expected_sha and event.get("target") == entry["path"]:
+            intents[event.get("path")] = event
+        elif action == "stage-verified" and event.get("sha256") == expected_sha:
+            if event.get("path") not in intents or not isinstance(event.get("id"), str) or not event["id"]:
+                continue
+            if not isinstance(event.get("parent"), str) or not event["parent"]:
+                continue
+            if event.get("target", entry["path"]) != entry["path"]:
+                continue
+            staged[event["id"]] = event
+        elif action in {"promotion-started", "promoted"} and event.get("path") == entry["path"]:
+            identifier = event.get("id")
+            if identifier not in staged:
+                continue
+            if action == "promoted" and event.get("sha256") != expected_sha:
+                continue
+            if action == "promotion-started" and event.get("sha256", expected_sha) != expected_sha:
+                continue
+            if event.get("parent", staged[identifier]["parent"]) != staged[identifier]["parent"]:
+                continue
+            candidates[identifier] = staged[identifier]["parent"]
+    if len(candidates) != 1:
+        raise Refusal("new canonical target lacks unambiguous journaled publication ID evidence")
+    identifier, parent = next(iter(candidates.items()))
+    return identifier, parent
+
+
+def verify_plan(plan, key, state, remote):
+    if plan.get("blockers"):
+        raise Refusal("plan contains unresolved provenance decisions")
+    remote.uploads_empty()
+    rows = namespace(plan, remote)
+    events = state.events(key)
+    verified = {}
+    for entry in plan["entries"]:
+        expected = entry["sha256"]
+        if expected is None:
+            prepared = [e for e in events if e.get("event") == "prepared" and e.get("entry") == entry["key"]
+                        and e.get("recipe") == digest(entry["recipe"])]
+            if not prepared:
+                raise Refusal("generated output has not been prepared under this recipe")
+            expected = prepared[-1]["sha256"]
+        if entry["keep_id"]:
+            identifier, parent = entry["keep_id"], None
+            found = [r for r in rows if r["path"] == entry["path"] and r["id"] == identifier]
+        else:
+            identifier, parent = journaled_canonical(entry, expected, events)
+            found = [r for r in rows if r["path"].casefold() == entry["path"].casefold()]
+        if len(found) != 1:
+            raise Refusal("canonical Drive target is missing or ambiguous by ID")
+        if found[0]["id"] != identifier or found[0]["path"] != entry["path"] or (parent is not None and found[0]["parent"] != parent):
+            raise Refusal("canonical Drive target differs from its journaled ID, parent or target")
+        if remote.sha256(found[0]) != expected:
+            raise Refusal("independent Drive SHA256 does not match canonical bytes")
+        verified[entry["key"]] = {"id": found[0]["id"], "sha256": expected,
+                                  "path": entry["path"], "row": found[0]}
+    remote.uploads_empty()
+    state.event(key, "verified", entries=verified)
+    return verified
+
+
+def retire_plan(plan, key, approved_digest, state, remote):
+    if approved_digest != key:
+        raise Refusal("retirement requires explicit approval of the exact full plan digest")
+    verified = verify_plan(plan, key, state, remote)
+    root = Path(plan["source_root"])
+    if root.resolve() != root.absolute():
+        raise Refusal("retirement root traverses a symlink")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if {"dev": st.st_dev, "ino": st.st_ino} != plan["source_identity"]:
+            raise Refusal("retirement root filesystem identity changed")
+        return _retire_verified(plan, key, state, remote, verified, fd)
+    finally:
+        os.close(fd)
+
+
+def _retire_verified(plan, key, state, remote, verified, root_fd):
+    keep_ids = {e["id"] for e in verified.values()}
+    root = Path(plan["source_root"])
+    quarantine = root / ".gdm-retired" / key
+    paths = plan["local_retirement"]
+    # Revalidate every local candidate before moving even one file. Resumes
+    # recognize only the exact already-retired path and matching planned bytes.
+    for rel in paths:
+        moved = False
+        try:
+            with anchored_parent(root_fd, rel) as (parent, name):
+                actual = hash_at(parent, name)
+        except FileNotFoundError:
+            moved = True
+            with anchored_parent(root_fd, f".gdm-retired/{key}/{rel}") as (parent, name):
+                actual = hash_at(parent, name)
+        expected = plan["local"][rel]
+        if actual["sha256"] != expected["sha256"] or actual["fingerprint"]["size"] != expected["fingerprint"]["size"]:
+            raise Refusal("retirement source changed since planning")
+        if not moved and actual["fingerprint"] != expected["fingerprint"]:
+            raise Refusal("retirement source identity changed since planning")
+    for item in plan["retirement"]:
+        namespace(plan, remote)
+        remote.current(verified[item["canonical_key"]]["row"])
+        row = item["row"]
+        if row["id"] in keep_ids:
+            raise Refusal("retirement manifest includes a verified canonical Drive ID")
+        moved = remote.retired(row, key)
+        if moved is not None:
+            if remote.sha256(moved) != item["sha256"]:
+                raise Refusal("quarantined Drive object content changed")
+            state.event(key, "remote-retired", id=row["id"], reason=item["reason"], reconciled=True,
+                        original_parent=row["parent"], quarantine_parent=moved["parent"])
+            continue
+        if remote.sha256(row) != item["sha256"]:
+            raise Refusal("Drive retirement source changed")
+        state.event(key, "remote-retire-started", id=row["id"])
+        remote.retire(row, key)
+        moved = remote.retired(row, key)
+        if moved is None or remote.sha256(moved) != item["sha256"]:
+            raise Refusal("Drive quarantine move needs reconciliation before further retirement")
+        state.event(key, "remote-retired", id=row["id"], reason=item["reason"],
+                    original_parent=row["parent"], quarantine_parent=moved["parent"])
+    for rel in paths:
+        with anchored_parent(root_fd, rel) as (source_fd, source_name):
+            try:
+                actual = hash_at(source_fd, source_name)
+            except FileNotFoundError:
+                continue
+            if actual != plan["local"][rel]:
+                raise Refusal("local retirement source changed immediately before move")
+            with anchored_parent(root_fd, f".gdm-retired/{key}/{rel}", create=True) as (dest_fd, dest_name):
+                if fingerprint(os.stat(source_name, dir_fd=source_fd, follow_symlinks=False)) != actual["fingerprint"]:
+                    raise Refusal("local retirement source identity changed before rename")
+                rename_noreplace(source_name, dest_name, source_fd, dest_fd)
+                after = hash_at(dest_fd, dest_name)
+                if after["sha256"] != actual["sha256"]:
+                    raise Refusal("local quarantine move needs reconciliation")
+        state.event(key, "local-retired", path=rel)
+    state.event(key, "retired", local_files=len(paths), remote_objects=len(plan["retirement"]))
+    return {"local_files": len(paths), "remote_objects": len(plan["retirement"]),
+            "quarantine": str(quarantine), "status": "recoverable-quarantine",
+            "space_reclaimed": False, "permanent_deletion": False,
+            "unresolved_files": len(plan.get("unresolved", [])), "single_copy_complete": False}
+
+
+def configuration(settings_path, state_override):
+    with Path(settings_path).open() as f:
+        settings = json.load(f)
+    units = [u for u in settings.get("units", []) if u.get("org") == ORG]
+    if len(units) != 1:
+        raise Refusal("effective settings must resolve exactly one Sulliwood unit")
+    unit = units[0]
+    point = Path(unit["point"]).expanduser().absolute()
+    state_root = Path(settings.get("stateDir", Path(settings_path).parent)).expanduser().absolute()
+    photo_state = Path(state_override).expanduser().absolute() if state_override else state_root / "photos" / ORG
+    excluded = [SSD_ROOT, point, Path(settings.get("cacheRoot", "/Volumes/TinylandSSD/tinyland/gdrive-cache")).expanduser()]
+    if any(photo_state == p or p in photo_state.parents for p in excluded):
+        raise Refusal("private photo state cannot live inside sources, mount or VFS cache")
+    return point, state_root, photo_state, unit["sock"]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("plan", "apply", "verify", "retire"))
+    parser.add_argument("plan_digest", nargs="?")
+    parser.add_argument("--approve-digest", help="explicit exact-manifest approval for recoverable retirement")
+    parser.add_argument("--settings", default=str(Path.home() / ".local/state/gdrive-mounts/effective-settings.json"))
+    parser.add_argument("--state-dir")
+    args = parser.parse_args(argv)
+    try:
+        point, runtime, private, sock = configuration(args.settings, args.state_dir)
+        state = State(private)
+        remote = RcloneRemote(runtime / f"rclone-{ORG}.conf", state, sock)
+        with state.locked():
+            if args.command == "plan":
+                if args.plan_digest:
+                    raise Refusal("plan does not accept an existing digest")
+                plan = make_plan(SSD_ROOT, point, remote)
+                key = state.save(plan)
+                result = {"plan": key, "entries": len(plan["entries"]),
+                          "retirement_candidates": len(plan["retirement"]), "warning_count": len(plan["warnings"]),
+                          "unresolved_files": len(plan["unresolved"]), "blocker_count": len(plan["blockers"])}
+            else:
+                if not args.plan_digest:
+                    raise Refusal("command requires an immutable plan digest")
+                key, plan = args.plan_digest, state.load(args.plan_digest)
+                if plan["source_root"] != str(SSD_ROOT) or plan["mount_point"] != str(point):
+                    raise Refusal("plan roots do not match the explicit corpus and effective mount")
+                if args.command == "apply":
+                    result = {"entries": apply_plan(plan, key, state, remote, MountedIO(point))}
+                elif args.command == "verify":
+                    result = {"verified": len(verify_plan(plan, key, state, remote))}
+                else:
+                    result = retire_plan(plan, key, args.approve_digest, state, remote)
+                    result.pop("quarantine", None)  # Exact locations remain in the private plan/journal.
+                result["plan"] = key
+            print(json.dumps(result, sort_keys=True))
+        return 0
+    except (Refusal, OSError, ValueError, KeyError, ImportError) as error:
+        print(f"photos: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

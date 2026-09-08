@@ -26,3 +26,7 @@ stage/
 user.bazelrc
 .env
 .env.local
+
+# Python test bytecode; private photo manifests belong outside the repo.
+__pycache__/
+*.pyc

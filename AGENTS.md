@@ -17,6 +17,16 @@ target — see `docs/position.md`.
 4. sting is client-only. Nothing durable runs there.
 5. Signed commits, PR flow. No direct push to `main` past the initial
    scaffold commit.
+6. Photo consolidation keeps each distinct original and one accepted WebP
+   in Drive. Preserve existing orientation and publication restrictions.
+   Deduplicate by verified content and Drive ID, never filename alone;
+   retirement requires an explicitly approved manifest and remote verification.
+7. Photo publication writes bytes through the mount to journal-owned UUID
+   staging files, independently verifies their Drive IDs/hashes, then promotes
+   those same IDs through the Drive API. This exception was ratified 2026-09-08
+   because Apple NFS lacks exclusive rename on this backend. Preserve existing
+   objects and refuse name ambiguity; never fall back to an overwriting rename
+   or claim globally atomic filename exclusion against concurrent writers.
 
 ## Where each fact lives
 
@@ -42,8 +52,10 @@ here), prompt-toon (agent-output shaping conventions).
 
 ## Boundary map
 
-- `lab` — secrets (sops/age) and deploy (home-manager wrapper, attended
-  `just nix-switch macbook-neo`).
+- `lab` — secrets (sops/age) and deploy (home-manager wrapper). Neo-first
+  delivery uses an attended `just nix-switch-local 'jess@macbook-neo'`
+  from a reviewed candidate, with source and active-generation verification.
+  A configured daily switch is not evidence that delivery happened.
 - `finances` — session-notes home only; otherwise unrelated.
 - `tummycrypt` — the long-term successor (TCFS). See `docs/position.md`.
 
@@ -60,6 +72,7 @@ here), prompt-toon (agent-output shaping conventions).
 | CI surface (actionlint + ActionPlan) | `just workflow-validate` |
 | Secrets scan, commit history | `just secrets-scan-history` |
 | Shell library unit tests | `just test-lib` |
+| Synthetic photo safety contracts | `just test-photos` |
 | Home-manager module eval | `just hm-eval` |
 | Home-manager eval proof, built | `just hm-eval-build` |
 | Bazel candidate graph | `just bazel-test` |
