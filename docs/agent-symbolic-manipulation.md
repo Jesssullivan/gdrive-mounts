@@ -127,6 +127,10 @@ manifest for this acceptance workload.
 
 `just test-photos` runs synthetic fixtures only. It is registered in
 `just check`, Bazel `photos_test` / `ci_validation_suite`, and the Nix
-`photos` check. Run heavy checks on an approved builder, not a pressured Neo.
+`photos` check. The Nix and Bazel gates require the actual Pillow/WebP/HEIF
+runtime with `GDM_PHOTOS_REQUIRE_CODECS=1`; missing codecs fail those gates.
+The tiny real HEIF-to-WebP fixture checks orientation, metadata removal and
+unchanged original bytes. Ambient codec skips are not production acceptance.
+Run heavy checks on an approved builder, not a pressured Neo.
 Record one sanitized, indexed `docs/agent-notes/` receipt and link separate
 mount/photo evidence to TIN-3883 and TIN-4000. Raw inventories stay private.

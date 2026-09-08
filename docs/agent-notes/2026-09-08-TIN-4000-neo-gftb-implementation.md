@@ -117,3 +117,85 @@ canonical Drive IDs and hashes, preserved curation, and a no-op rerun before
 approving the exact retirement manifest. Unknown derivatives and incomplete
 staging remain preserved and explicitly unresolved. Quarantine consumes
 space; one active SSOT is not permanent deletion of recovery copies.
+
+## Follow-through — September 8, 14:25–14:50 EDT
+
+The operator requested completion. The source and validation work advanced;
+live activation and photo mutation remain unperformed.
+
+### Source and real codec verification
+
+Signed photo commit `158fe2f0ac4fa26ec8554717220e2fc61f3fd797` adds a real
+32×16 HEIF-to-WebP conversion fixture and a strict codec dependency gate.
+Nix and Bazel set `GDM_PHOTOS_REQUIRE_CODECS=1`: absent codecs cannot silently
+pass as skips. The fixture verifies rotation, metadata removal and preservation
+of original bytes. Ambient tests ran 76 cases with two codec skips; the focused
+strict dependency check correctly failed without Pillow.
+
+The declared Honey builder passed `just nix-remote-builder-verify --live --strict`.
+`just nix-guard-verify --expect-max-jobs 0 --expect-fallback false` confirmed
+that Neo could not compile locally. Honey had 185949 MiB available memory and
+199G available under `/nix` at the bounded admission snapshot.
+
+The online Linux photo-check dry-run needed two small derivations and 53 cached
+paths (38.3 MiB download). The build ran through the existing Honey SSH builder.
+Its 90-second local client deadline expired after the remote check started;
+that exit 124 is not a successful local build receipt. Reading the retained
+remote log for
+`/nix/store/c0qz0d5hrpwbsma8dnfcf1pmdh2a4ajn-gdrive-mounts-photo-contracts.drv`
+independently established **76 tests passed, no skips**, in 1.211 seconds.
+The local check output import was not verified. This is Linux codec proof,
+not realization of the missing Darwin photo runtime.
+
+`just hm-eval-build` also completed successfully:
+`/nix/store/c297zv68av7v7g0fd4iz6dw79xcyllqd-gdrive-mounts-hm-eval`.
+That run used the source checkout with the photo-runbook documentation edit
+uncommitted; implementation and tests matched the signed codec commit.
+No full lab activation closure or whole Bazel CI result is claimed.
+
+### Consumer publication needs an owner decision
+
+PR #1691's note-summary lint was corrected and passed. The signed PR branch
+is now `32c05ad4cb729a9848712313ab0679672cab80d9`; the signed minimal local
+delivery branch is `0282fb4056b911bc335dddcdbda671209b056c94`.
+Its private-input cache entry still names the old mount revision. The 24
+wrapper assertions do not cover that materializer prerequisite.
+
+The registered exact-head publisher was dispatched once. It failed at its
+source-authority admission, not during archive creation:
+
+> nix-private-input: Jesssullivan/gdrive-mounts main must remain an exact protected branch
+
+[Publisher run 34263562578](https://github.com/tinyland-inc/lab/actions/runs/34263562578)
+exited 2. A direct GitHub read confirmed `main` at
+`2cd5b8779adb3767937341ab2c20b352a1348152` has `protected: false` and the
+repository ruleset list is empty. The source repository is private.
+No archive or signed cache-registry commit was produced. PR #1691 is draft,
+as the publisher's admission requires. Neither branch is delivery-ready until
+the owner resolves protection, publication succeeds, and the exact governed
+registry commit is carried onto the minimal branch. No protection, visibility,
+publisher policy or credentials were changed to bypass this gate.
+
+### Fresh native admission evidence
+
+TinylandSSD's native UUID is
+`E3131481-8D53-4688-B20A-E1F71DC0C61E`, matching current lab host declarations;
+it had 2.8T available. The exact identity gap is closed, not the entire I/O
+health gate. At 14:25, memory pressure remained level 2 with 5464.62 MiB swap.
+Direct local HTTP requests to `vfs/stats` and `core/pid` timed out after 12
+and 5 seconds respectively, with no response bytes. Queue state remains unknown.
+
+The existing watchdog restarted PID 12832 at 18:26:54Z while its record said
+`probe: ok` and NFS `not responding`. The replacement PID 60628 was later
+observed in kernel-wait state `U`. No agent triggered this restart.
+
+At 18:34:01Z, the bounded native sample showed 60% idle CPU and roughly
+303 MB/s on the sole external physical disk. A preceding-15-minute kernel
+transport-error scan found no matching fault events. These observations do
+not establish CPU saturation, disk failure, or the cause of the kernel wait.
+They do not authorize resets, repair, unmounting or process termination.
+
+The temporary lab source worktree was removed. The primary lab checkout's
+other-seat changes remain untouched. The owner protection decision and fresh
+Neo queue/recovery evidence are the next gates; photo retirement still needs
+its own exact-manifest approval after live verification.
