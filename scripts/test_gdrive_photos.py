@@ -363,6 +363,33 @@ class PhotosTests(unittest.TestCase):
         self.assertTrue((self.source / "originals/a.HEIC").exists())
         self.assertEqual(self.remote.moves, [])
 
+    def test_unplanned_same_name_alias_cannot_verify_or_authorize_retirement(self):
+        plan, key = self.plan()
+        self.apply(plan, key)
+        for alias_path, payload in (
+            ("a.HEIC", b"synthetic-original-one"),
+            ("a.HEIC", b"unrelated-photo"),
+            ("A.HEIC", b"synthetic-original-one"),
+        ):
+            with self.subTest(path=alias_path, payload=payload):
+                self.remote.add(alias_path, payload, "unplanned-alias")
+                with self.assertRaisesRegex(photos.Refusal, "unplanned.*alias"):
+                    photos.verify_plan(plan, key, self.state, self.remote)
+                with self.assertRaisesRegex(photos.Refusal, "unplanned.*alias"):
+                    photos.retire_plan(plan, key, key, self.state, self.remote)
+                self.remote.rows.pop("unplanned-alias")
+        self.assertEqual(self.remote.moves, [])
+        self.assertTrue((self.source / "originals/a.HEIC").exists())
+
+    def test_planned_same_name_duplicate_verifies_until_retired(self):
+        self.remote.add("a.HEIC", b"synthetic-original-one", "original-b")
+        plan, key = self.plan()
+        self.apply(plan, key)
+        self.assertEqual(len(photos.verify_plan(plan, key, self.state, self.remote)), 2)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertEqual(self.remote.moves, ["original-b"])
+        self.assertEqual(len(photos.verify_plan(plan, key, self.state, self.remote)), 2)
+
     def test_verification_reconciles_same_id_after_interrupted_promotion(self):
         plan, key = self.plan()
         rename = self.remote.rename
@@ -444,6 +471,63 @@ class PhotosTests(unittest.TestCase):
         self.assertEqual(moved.read_bytes(), b"synthetic-original-one")
         photos.retire_plan(plan, key, key, self.state, self.remote)
         self.assertEqual(self.remote.moves, ["original-b"])
+
+    def test_apply_after_retirement_is_a_verified_noop(self):
+        plan, key = self.plan()
+        self.apply(plan, key)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertFalse((self.source / "webp/a.webp").exists())
+        writes = self.mount.writes
+        self.apply(plan, key)
+        self.assertEqual(self.mount.writes, writes)
+        self.assertEqual(len(photos.verify_plan(plan, key, self.state, self.remote)), 2)
+        self.assertTrue(any(event["event"] == "apply-noop" for event in self.state.events(key)))
+
+    def test_post_retirement_noop_still_requires_mount_and_canonical_id(self):
+        plan, key = self.plan()
+        self.apply(plan, key)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.mount.live = False
+        with self.assertRaisesRegex(photos.Refusal, "mount absent"):
+            self.apply(plan, key)
+        self.mount.live = True
+        output = next(row for row in self.remote.rows.values() if row["path"] == "webp/a.webp")
+        self.remote.rows.pop(output["id"])
+        self.remote.add("webp/a.webp", b"synthetic-corrected-webp", "replacement-id")
+        with self.assertRaisesRegex(photos.Refusal, "journaled ID"):
+            self.apply(plan, key)
+        self.assertEqual(self.mount.writes, 1)
+        self.assertFalse(any(event["event"] == "apply-noop" for event in self.state.events(key)))
+
+    def test_canonical_removed_during_remote_retirement_keeps_local_original(self):
+        self.remote.add("a.HEIC", b"synthetic-original-one", "original-b")
+        plan, key = self.plan()
+        self.apply(plan, key)
+        retire = self.remote.retire
+
+        def removed_canonical(row, digest):
+            retire(row, digest)
+            self.remote.rows.pop("original-a")
+
+        self.remote.retire = removed_canonical
+        with self.assertRaises(photos.Refusal):
+            photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertEqual((self.source / "originals/a.HEIC").read_bytes(), b"synthetic-original-one")
+
+    def test_canonical_bytes_changed_during_retirement_keeps_local_original(self):
+        self.remote.add("a.HEIC", b"synthetic-original-one", "original-b")
+        plan, key = self.plan()
+        self.apply(plan, key)
+        retire = self.remote.retire
+
+        def changed_canonical(row, digest):
+            retire(row, digest)
+            self.remote.payloads["original-a"] = b"changed-with-unchanged-metadata"
+
+        self.remote.retire = changed_canonical
+        with self.assertRaisesRegex(photos.Refusal, "canonical bytes changed"):
+            photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertEqual((self.source / "originals/a.HEIC").read_bytes(), b"synthetic-original-one")
 
     def test_changed_local_retirement_source_aborts_before_remote_move(self):
         self.remote.add("a.HEIC", b"synthetic-original-one", "original-b")

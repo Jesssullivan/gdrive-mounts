@@ -7,6 +7,7 @@ filesystem rename success cannot establish Apple NFS exclusive-rename support.
 import contextlib
 import errno
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -305,6 +306,103 @@ class RemoteAdapterTests(unittest.TestCase):
         rows = self.remote.inventory("folder-root")
         self.assertEqual([row["id"] for row in rows], ["event-folder"])
 
+    def plan_without_photo_io(self, local, rows, hashes):
+        """Exercise planning against synthetic inventory, without opening files."""
+        validator = mock.Mock(return_value={"width": 2000, "height": 1500})
+        with mock.patch.object(photos, "local_inventory", return_value=local), \
+                mock.patch.object(photos.Path, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=2)), \
+                mock.patch.object(self.remote, "root_folder", return_value="folder-root"), \
+                mock.patch.object(self.remote, "inventory", return_value=rows), \
+                mock.patch.object(self.remote, "sha256", side_effect=lambda row: hashes[row["id"]]), \
+                mock.patch.object(photos, "codec_versions", return_value={"synthetic": "1"}) as codecs:
+            plan = photos.make_plan("/synthetic/photos", "/synthetic/mount", self.remote, validator)
+        self.process.assert_not_called()
+        return plan, validator, codecs
+
+    def test_plan_blocks_remote_corrected_webp_when_local_output_missing(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        output = {**object_row("corrected-id", "a.webp", mime="image/webp"), "path": "webp/a.webp"}
+        plan, validator, codecs = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}}, [self.row, output],
+            {self.row["id"]: original_sha, output["id"]: corrected_sha})
+        self.assertEqual(len(plan["blockers"]), 1)
+        self.assertIn("accepted-output decision", plan["blockers"][0])
+        self.assertIn("corrected-id", plan["blockers"][0])
+        self.assertIn(corrected_sha, plan["blockers"][0])
+        self.assertFalse(any(entry["kind"] == "webp" for entry in plan["entries"]))
+        self.assertFalse(any(item["row"]["id"] == output["id"] for item in plan["retirement"]))
+        self.assertIn(output, plan["remote_inventory"])
+        validator.assert_not_called()
+        codecs.assert_not_called()
+
+    def test_plan_preserves_all_ambiguous_remote_derivative_ids(self):
+        original_sha = "1" * 64
+        outputs = [{**object_row(identifier, "a.webp", mime="image/webp"), "path": "webp/a.webp"}
+                   for identifier in ("corrected-one", "corrected-two")]
+        hashes = {self.row["id"]: original_sha, "corrected-one": "2" * 64, "corrected-two": "3" * 64}
+        plan, _, codecs = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}}, [self.row, *outputs], hashes)
+        self.assertEqual(len(plan["blockers"]), 1)
+        for output in outputs:
+            self.assertIn(output["id"], plan["blockers"][0])
+            self.assertIn(hashes[output["id"]], plan["blockers"][0])
+        self.assertEqual(plan["retirement"], [])
+        self.assertFalse(any(entry["kind"] == "webp" for entry in plan["entries"]))
+        codecs.assert_not_called()
+
+    def test_plan_checks_local_and_remote_original_aliases_for_remote_webp(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        original = {**self.row, "path": "event/b.HEIC", "name": "b.HEIC"}
+        for path in ("webp/event/a.webp", "webp/event/b.webp", "webp/event/A.WEBP"):
+            with self.subTest(path=path):
+                output = {**object_row("corrected-id", Path(path).name, mime="image/webp"), "path": path}
+                plan, _, codecs = self.plan_without_photo_io(
+                    {"originals/event/a.HEIC": {"sha256": original_sha}}, [original, output],
+                    {original["id"]: original_sha, output["id"]: corrected_sha})
+                self.assertTrue(plan["blockers"])
+                self.assertEqual(plan["retirement"], [])
+                self.assertFalse(any(entry["kind"] == "webp" for entry in plan["entries"]))
+                codecs.assert_not_called()
+
+    def test_plan_checks_remote_webp_before_original_collision_rename(self):
+        first_sha, second_sha = "1" * 64, "2" * 64
+        other = {**self.row, "id": "second-original"}
+        output = {**object_row("corrected-id", "a.webp", mime="image/webp"), "path": "webp/a.webp"}
+        plan, _, codecs = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": second_sha}}, [self.row, other, output],
+            {self.row["id"]: first_sha, other["id"]: second_sha, output["id"]: "3" * 64})
+        self.assertTrue(any(entry["rename_from"] for entry in plan["entries"] if entry["kind"] == "original"))
+        self.assertEqual(len(plan["blockers"]), 2)
+        self.assertEqual(plan["retirement"], [])
+        self.assertFalse(any(entry["kind"] == "webp" for entry in plan["entries"]))
+        codecs.assert_not_called()
+
+    def test_plan_still_adopts_accepted_local_webp_bytes(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        output = {**object_row("corrected-id", "a.webp", mime="image/webp"), "path": "webp/a.webp"}
+        plan, validator, codecs = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}, "webp/a.webp": {"sha256": corrected_sha}},
+            [self.row, output], {self.row["id"]: original_sha, output["id"]: corrected_sha})
+        entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+        self.assertEqual(plan["blockers"], [])
+        self.assertEqual(entry["keep_id"], "corrected-id")
+        self.assertEqual(entry["recipe"]["operation"], "adopt-corrected-webp")
+        validator.assert_called_once_with(Path("/synthetic/photos/webp/a.webp"))
+        codecs.assert_not_called()
+
+    def test_plan_still_encodes_when_no_matching_remote_derivative_exists(self):
+        original_sha = "1" * 64
+        unrelated = {**object_row("other-webp", "other.webp", mime="image/webp"), "path": "webp/other.webp"}
+        plan, validator, codecs = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}}, [self.row, unrelated],
+            {self.row["id"]: original_sha, unrelated["id"]: "2" * 64})
+        entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+        self.assertEqual(plan["blockers"], [])
+        self.assertEqual(entry["recipe"]["operation"], "encode-original")
+        self.assertEqual(plan["retirement"], [])
+        validator.assert_not_called()
+        codecs.assert_called_once_with()
+
     @contextlib.contextmanager
     def promotion_fixture(self, inject=None):
         """Run orchestration with the real CLI adapter and no filesystem I/O."""
@@ -422,6 +520,92 @@ class RemoteAdapterTests(unittest.TestCase):
             receipt = next(e for e in world.events if e["event"] == "promoted")
             self.assertEqual(receipt["id"], "staged-id")
             self.assertTrue(receipt["reconciled"])
+
+
+class CLIReportingTests(unittest.TestCase):
+    def run_cli(self, command):
+        plan = {"source_root": str(photos.SSD_ROOT), "mount_point": "/synthetic/mount",
+                "drive_root_id": "canonical-folder-id", "entries": [{"private": "private-photo-name"}],
+                "retirement": [], "warnings": [], "unresolved": [{"path": "private-unresolved-name"}],
+                "blockers": []}
+        state = mock.MagicMock()
+        state.save.return_value = "plan-digest"
+        state.load.return_value = plan
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name, value in {
+                "configuration": (Path("/synthetic/mount"), Path("/synthetic/runtime"),
+                                  Path("/synthetic/private"), "/synthetic/rc.sock"),
+                "State": state, "RcloneRemote": mock.Mock(), "MountedIO": mock.Mock(),
+                "make_plan": plan, "apply_plan": 1, "verified_location": 1,
+                "retire_plan": {"quarantine": "/private/quarantine", "local_files": 1,
+                                "permanent_deletion": False, "space_reclaimed": False},
+            }.items():
+                stack.enter_context(mock.patch.object(photos, name, return_value=value))
+            stack.enter_context(contextlib.redirect_stdout(output))
+            stack.enter_context(contextlib.redirect_stderr(errors))
+            args = [command] if command == "plan" else [command, "plan-digest"]
+            if command == "retire":
+                args += ["--approve-digest", "plan-digest"]
+            self.assertEqual(photos.main(args), 0, errors.getvalue())
+        return json.loads(output.getvalue()), output.getvalue()
+
+    def test_phase_reports_location_without_leaking_private_inventory(self):
+        for command in ("plan", "apply", "verify", "retire"):
+            with self.subTest(command=command):
+                result, raw = self.run_cli(command)
+                self.assertEqual(result["phase"], command)
+                self.assertEqual(result["plan"], "plan-digest")
+                self.assertEqual(result["canonical_location"], {
+                    "absolute_path": "/synthetic/mount/GFTB Stuff",
+                    "drive_folder_id": "canonical-folder-id",
+                    "mounted_directory_verified": command == "verify",
+                    "drive_contents_verified": command in {"verify", "retire"},
+                })
+                self.assertEqual(result["unresolved_files"], 1)
+                self.assertEqual(result["blocker_count"], 0)
+                for private in ("private-photo-name", "private-unresolved-name", "/private/quarantine"):
+                    self.assertNotIn(private, raw)
+                self.assertNotIn("deduplication_complete", result)
+
+    def location_fixture(self):
+        mount = mock.MagicMock()
+        mount.parent.return_value.__enter__.return_value = (71, ".gdm-location-check")
+        return mount
+
+    def test_verified_location_checks_directory_before_and_after_drive_readback(self):
+        mount = self.location_fixture()
+        identity = SimpleNamespace(st_dev=11, st_ino=23)
+        with mock.patch.object(photos.os, "fstat", return_value=identity):
+            with mock.patch.object(photos, "verify_plan", return_value={"original": {}, "webp": {}}) as verify:
+                self.assertEqual(photos.verified_location({}, "digest", "state", "remote", mount), 2)
+        verify.assert_called_once_with({}, "digest", "state", "remote")
+        self.assertEqual(mount.parent.call_args_list,
+                         [mock.call(".gdm-location-check"), mock.call(".gdm-location-check")])
+        self.assertEqual(mount.check.call_count, 2)
+
+    def test_verified_location_refuses_directory_replacement(self):
+        mount = self.location_fixture()
+        identities = [SimpleNamespace(st_dev=11, st_ino=23), SimpleNamespace(st_dev=11, st_ino=24)]
+        with mock.patch.object(photos.os, "fstat", side_effect=identities):
+            with mock.patch.object(photos, "verify_plan", return_value={}):
+                with self.assertRaisesRegex(photos.Refusal, "directory changed"):
+                    photos.verified_location({}, "digest", "state", "remote", mount)
+
+    def test_verified_location_refuses_absent_mount_before_drive_queries(self):
+        mount = self.location_fixture()
+        mount.__enter__.side_effect = photos.Refusal("mount absent")
+        with mock.patch.object(photos, "verify_plan") as verify:
+            with self.assertRaisesRegex(photos.Refusal, "mount absent"):
+                photos.verified_location({}, "digest", "state", "remote", mount)
+        verify.assert_not_called()
+
+    def test_verified_location_propagates_failed_drive_evidence(self):
+        mount = self.location_fixture()
+        with mock.patch.object(photos.os, "fstat", return_value=SimpleNamespace(st_dev=11, st_ino=23)):
+            with mock.patch.object(photos, "verify_plan", side_effect=photos.Refusal("uploads unknown")):
+                with self.assertRaisesRegex(photos.Refusal, "uploads unknown"):
+                    photos.verified_location({}, "digest", "state", "remote", mount)
 
 
 class NFSRenameContractTests(unittest.TestCase):

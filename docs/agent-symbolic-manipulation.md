@@ -69,11 +69,33 @@ Resolve missing provenance, filename collisions and unmapped files before
 publication. The historical 309 Drive names versus 227 staged originals
 establishes ambiguity, not today's count or proof of identical content.
 
+The JSON phase report includes `canonical_location.absolute_path` and
+`canonical_location.drive_folder_id`. Planning reports a proposed location,
+not a verified mount. Only successful `verify` sets
+`mounted_directory_verified: true`: it holds the actual GFTB directory open,
+checks mount identity, independently verifies Drive contents, and reopens the
+directory to detect replacement. `drive_contents_verified` is separate.
+Neither flag is a claim that deduplication or retirement is complete. Private
+filenames, warning details and quarantine locations stay in the manifest and
+journal; standard output reports counts.
+
 `apply` adopts accepted WebP bytes before considering conversion. The latest
 orientation judgments were relative to QuickLook intermediates; their angles
 must not be replayed blindly against newly EXIF-transposed HEICs. Preserve
 original metadata, videos, sidecars, design selections and do-not-publish
 restrictions. This workflow does not change sharing or publish a website.
+
+If a corrected WebP exists only on Drive, the planner preserves its ID/hash
+and blocks regeneration pending proven adoption or an orientation decision.
+Missing the SSD derivative is not evidence that the accepted output is absent.
+
+Before live publication, inspect the actual `orientation-judged.csv` and
+`design-picks.md` grammar and authoritative copies. Bind selections and
+do-not-publish references through duplicate aliases to canonical originals
+and WebPs. Current byte-preservation checks do not prove that those references
+still resolve after deduplication; missing or ambiguous references remain an
+acceptance blocker. The historical selection count is evidence to reconcile,
+not a universal parser rule. Do not run `apply` on an unreviewed curation plan.
 
 Publication is serial and mount-guarded. Write bytes into journal-owned UUID
 staging names through the mount, verify their exact Drive IDs and hashes after
@@ -110,6 +132,10 @@ files are excluded from future source inventories but still occupy space.
 Report that distinction: one active SSOT does not mean recovery copies were
 permanently erased. Unresolved lineage means incomplete retirement, not
 permission to discard unmatched files. No command purges recovery copies.
+
+After successful retirement, rerunning `apply` on the same digest checks the
+mount and canonical Drive IDs/hashes without reopening quarantined inputs.
+It records `apply-noop`; changed or substituted canonical objects still fail.
 
 ## Acceptance and tests
 

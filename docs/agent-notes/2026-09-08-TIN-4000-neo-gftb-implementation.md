@@ -310,3 +310,76 @@ receipt. Completion must report the actual mounted absolute path and canonical
 Drive folder ID, content/curation verification, a no-op rerun, unresolved items,
 and the result of exact-manifest-approved duplicate retirement. The local SSD
 photo source and VFS cache must not be confused with that canonical location.
+
+## Three-hour-scope goal and parallel photo preparation
+
+The operator dispatched the parallel lab agent, then explicitly requested an
+active `/goal` sized as a three-hour tranche. The goal is set: three hours is
+a scope guide, not a deadline or timeout, and no token budget was requested.
+The lab agent owns closure realization, authorized recovery and the direct
+local switch. This lane continues independent photo preparation without
+polling or duplicating that agent's build/switch operations. Dispatch does not
+supply a successful activation receipt.
+
+Four reproduced preservation/verification defects were corrected offline:
+
+- After completed retirement, same-digest `apply` now re-verifies the mount
+  and canonical IDs/hashes and records a no-op; it does not reopen inputs that
+  the approved retirement moved into quarantine.
+- Each local quarantine move freshly checks its byte-equivalent canonical
+  Drive ID and hash. Losing or changing that copy during remote retirement
+  stops local retirement.
+- Verification rejects newly introduced same-name or case-variant objects.
+  Unchanged duplicates explicitly listed in the manifest remain permitted
+  until their approved retirement.
+- A corrected derivative that exists only on Drive is not silently replaced
+  by an EXIF-only re-encode. Matching alias/pre-rename paths are preserved with
+  their IDs/hashes in a blocker pending an accepted-output decision.
+
+The CLI now reports the absolute canonical location and Drive folder ID, with
+separate mounted-directory and Drive-content verification flags. The `verify`
+command holds the real GFTB directory open through independent Drive
+verification and checks its identity again before reporting success. This
+does not create a probe file or infer deduplication completion. Synthetic
+report tests also verify that private filenames and quarantine paths are not
+included in standard output.
+
+The registered `just test-photos` run completed with 93 tests: 91 passed and
+two native-codec fixtures skipped in the ambient environment. Whitespace and
+working-tree secrets checks passed. The earlier pinned Linux 76-test proof
+does not certify these new tests, and this run is not Darwin runtime or live
+NFS acceptance. No live photo, cache, mount or Drive operation was performed.
+
+The exact previously evaluated Darwin photo interpreter remains unavailable:
+`/nix/store/2arhfjs7qwxch1ac40wczw6ai1s7gn7h-python3-3.14.7-env/bin/python3`.
+No import probe or realization ran. `packages.photos` stays separate from the
+Home Manager mount package, so switching the mount does not install that
+runtime. After the switch lane releases resources, inspect
+`nix build --dry-run --no-link .#packages.aarch64-darwin.photos`; realization
+must retain the existing substitution-only settings. A missing Darwin build
+is not permission to re-arm Neo compilation or send it to an x86 builder.
+
+Curation acceptance remains explicit unfinished work. The tracked repository
+does not contain the actual selection/restriction records. After admission,
+inspect the authoritative `orientation-judged.csv` and `design-picks.md`,
+preserve their bytes, and bind their references through aliases to canonical
+originals and derivatives. Current byte-preservation checks alone do not prove
+those references survive deduplication. Missing/ambiguous references must be
+resolved before live `apply`; actual grammar, not an invented parser or a
+hard-coded historical count, determines the coverage tests.
+
+The next evidence from the parallel lab lane must identify the exact source,
+active generation/closure, effective NFS/watchdog settings, storage/resource
+admission and upload reconciliation. Then qualify the pinned Darwin photo
+runtime, make the bounded private plan, review curation and run publication
+and verification one phase at a time. Exact retirement-manifest approval
+remains separate. Report switch readiness and final GFTB path/deduplication
+completion as separate milestones; neither is established by this source pass.
+
+The operator relayed the parallel lab agent's recovery question: its upload
+query timed out, and the startup wrapper may force-unmount an existing mount.
+This lane recommended closure preparation only at this point, with no writer,
+mount or watchdog stop and no activation. Request the exact closure and bounded
+graceful-recovery steps before a separate recovery decision. The quoted options
+are not a selection or recovery authorization. A graceful-stop/unmount failure
+must not silently escalate into force-unmount, cache clearing or retries.

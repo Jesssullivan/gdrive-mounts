@@ -799,6 +799,21 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             recipe = {**RECIPE, "operation": "adopt-corrected-webp", **dimensions,
                       "source_original_sha256": original["sha256"]}
         else:
+            # A missing SSD derivative is not evidence that Drive lacks the
+            # accepted correction. Check every known original alias, including
+            # its pre-collision name, before proposing an EXIF-only re-encode.
+            source_paths = {original["path"], *(r["path"] for r in group["remote"]),
+                            *(str(PurePosixPath(p).relative_to("originals")) for p in group["local"])}
+            derivative_paths = {str(PurePosixPath("webp") / PurePosixPath(p).with_suffix(".webp")).casefold()
+                                for p in source_paths}
+            existing = [r for path in sorted(derivative_paths) for r in by_path.get(path, [])
+                        if r["id"] in hashes]
+            if existing:
+                evidence = ", ".join(f"{r['path']} (ID {r['id']}, SHA256 {hashes[r['id']]})"
+                                     for r in sorted(existing, key=lambda row: (row["path"], row["id"])))
+                blockers.append(f"remote WebP requires accepted-output decision for {original['path']}: {evidence}; "
+                                "resolve ID/hash-bound adoption or orientation before regeneration or retirement")
+                continue
             sha = None
             wanted = str(PurePosixPath("webp") / PurePosixPath(original["path"]).with_suffix(".webp"))
             recipe = {**RECIPE, "operation": "encode-original",
@@ -908,6 +923,13 @@ def apply_plan(plan, key, state, remote, mount, encoder=convert, validator=valid
     entries = {entry["key"]: entry for entry in plan["entries"]}
     publications = []
     with mount:
+        if any(event.get("event") == "retired" for event in state.events(key)):
+            # Successful retirement deliberately removes active local inputs.
+            # A same-plan rerun must prove the existing canonical IDs/bytes,
+            # not try to publish again from those quarantined inputs.
+            verified = verify_plan(plan, key, state, remote)
+            state.event(key, "apply-noop", entries=len(verified), reason="retired-plan")
+            return len(verified)
         # Reconcile all same-name/different-byte originals before accessing their
         # pathname view. These metadata-only API moves preserve each original ID.
         for entry in plan["entries"]:
@@ -1085,6 +1107,18 @@ def verify_plan(plan, key, state, remote):
             expected = prepared[-1]["sha256"]
         if entry["keep_id"]:
             identifier, parent = entry["keep_id"], None
+            approved_aliases = {item["row"]["id"]: item["row"] for item in plan["retirement"]
+                                if item["canonical_key"] == entry["key"] and
+                                item["row"]["path"].casefold() == entry["path"].casefold()}
+            for alias in rows:
+                if alias["path"].casefold() != entry["path"].casefold() or alias["id"] == identifier:
+                    continue
+                approved = approved_aliases.get(alias["id"])
+                if approved is None or alias["path"] != approved["path"] or alias["parent"] != approved["parent"]:
+                    raise Refusal("canonical Drive target has an unplanned same-name alias")
+                # Manifest-listed duplicates may remain until quarantine, but
+                # their identity and fingerprint must still match that plan.
+                remote.current(approved)
             found = [r for r in rows if r["path"] == entry["path"] and r["id"] == identifier]
         else:
             identifier, parent = journaled_canonical(entry, expected, events)
@@ -1163,6 +1197,17 @@ def _retire_verified(plan, key, state, remote, verified, root_fd):
         state.event(key, "remote-retired", id=row["id"], reason=item["reason"],
                     original_parent=row["parent"], quarantine_parent=moved["parent"])
     for rel in paths:
+        expected_sha = plan["local"][rel]["sha256"]
+        canonical_rows = [entry["row"] for entry in verified.values() if entry["sha256"] == expected_sha]
+        if not canonical_rows:
+            raise Refusal("local retirement lacks a verified byte-equivalent canonical object")
+        # Remote retirement may have taken arbitrarily long. Re-prove the
+        # exact canonical object before hashing and moving each local copy.
+        namespace(plan, remote)
+        canonical_row = canonical_rows[0]
+        remote.current(canonical_row)
+        if remote.sha256(canonical_row) != expected_sha:
+            raise Refusal("canonical bytes changed before local retirement")
         with anchored_parent(root_fd, rel) as (source_fd, source_name):
             try:
                 actual = hash_at(source_fd, source_name)
@@ -1201,6 +1246,26 @@ def configuration(settings_path, state_override):
     return point, state_root, photo_state, unit["sock"]
 
 
+def verified_location(plan, key, state, remote, mount):
+    """Verify Drive content while holding the actual mounted corpus directory.
+
+    The leaf below is never opened or created: parent() opens GFTB Stuff
+    without following symlinks. Reopening it catches directory replacement
+    during independent Drive verification. This is not a deduplication verdict.
+    """
+    with mount:
+        with mount.parent(".gdm-location-check") as (folder_fd, _):
+            before = os.fstat(folder_fd)
+            verified = verify_plan(plan, key, state, remote)
+            mount.check()
+            with mount.parent(".gdm-location-check") as (current_fd, _):
+                after = os.fstat(current_fd)
+                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                    raise Refusal("mounted GFTB directory changed during verification")
+            mount.check()
+    return len(verified)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("plan", "apply", "verify", "retire"))
@@ -1231,11 +1296,20 @@ def main(argv=None):
                 if args.command == "apply":
                     result = {"entries": apply_plan(plan, key, state, remote, MountedIO(point))}
                 elif args.command == "verify":
-                    result = {"verified": len(verify_plan(plan, key, state, remote))}
+                    result = {"verified": verified_location(plan, key, state, remote, MountedIO(point))}
                 else:
                     result = retire_plan(plan, key, args.approve_digest, state, remote)
                     result.pop("quarantine", None)  # Exact locations remain in the private plan/journal.
                 result["plan"] = key
+            result["phase"] = args.command
+            result["canonical_location"] = {
+                "absolute_path": str(point / FOLDER),
+                "drive_folder_id": plan["drive_root_id"],
+                "mounted_directory_verified": args.command == "verify",
+                "drive_contents_verified": args.command in {"verify", "retire"},
+            }
+            result["unresolved_files"] = len(plan.get("unresolved", []))
+            result["blocker_count"] = len(plan.get("blockers", []))
             print(json.dumps(result, sort_keys=True))
         return 0
     except (Refusal, OSError, ValueError, KeyError, ImportError) as error:
