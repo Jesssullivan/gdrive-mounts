@@ -135,6 +135,7 @@ sh_test(
     name = "photos_test",
     srcs = ["scripts/test-photos.sh"],
     data = [":scripts"],
+    env = {"GDM_PHOTOS_REQUIRE_CODECS": "1"},
     tags = [
         "local",
         "requires-network=no",

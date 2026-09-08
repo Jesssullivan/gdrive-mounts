@@ -70,7 +70,7 @@
           photos = pkgs.runCommand "gdrive-mounts-photo-contracts"
             { nativeBuildInputs = [ photoPython ]; }
             ''
-              export PYTHONDONTWRITEBYTECODE=1
+              export PYTHONDONTWRITEBYTECODE=1 GDM_PHOTOS_REQUIRE_CODECS=1
               bash ${self}/scripts/test-photos.sh
               touch $out
             '';

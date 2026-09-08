@@ -652,6 +652,57 @@ class PhotosTests(unittest.TestCase):
         with self.assertRaises(Exception):
             photos.validate_webp(image)
 
+    def test_required_codec_runtime(self):
+        """Pinned gates must not turn absent native codecs into a green skip."""
+        if os.environ.get("GDM_PHOTOS_REQUIRE_CODECS") != "1":
+            return
+        try:
+            from PIL import Image, features
+            import pillow_heif
+        except ImportError as exc:
+            self.fail(f"required photo codec runtime unavailable: {exc}")
+        self.assertTrue(features.check("webp"), "required Pillow WebP feature unavailable")
+        pillow_heif.register_heif_opener()
+        self.assertIn("HEIF", Image.OPEN, "required HEIF decoder is not registered")
+        self.assertIn("HEIF", Image.SAVE, "required synthetic HEIF encoder is not registered")
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("PIL") and importlib.util.find_spec("pillow_heif"),
+        "Pillow and HEIF available in photos package",
+    )
+    def test_tiny_real_heif_to_webp_conversion(self):
+        """Exercise the actual codec pipeline, orientation, and metadata removal."""
+        from PIL import Image
+        import pillow_heif
+
+        source = self.root / "synthetic.heic"
+        destination = self.root / "synthetic.webp"
+        image = Image.new("RGB", (32, 16), "red")
+        image.paste("blue", (16, 0, 32, 16))
+        exif = Image.Exif()
+        exif[274] = 6  # Clockwise quarter turn: red above blue after decoding.
+        exif[270] = "synthetic private metadata"
+        with mock.patch.object(pillow_heif.options, "DECODE_THREADS", 1):
+            pillow_heif.register_heif_opener()
+            image.save(
+                source, "HEIF", quality=90, exif=exif.tobytes(),
+                xmp=b'<x:xmpmeta xmlns:x="adobe:ns:meta/">synthetic-only</x:xmpmeta>',
+                enc_params={"preset": "ultrafast", "x265:pools": "none", "x265:frame-threads": "1"},
+            )
+            with Image.open(source) as encoded:
+                self.assertTrue(encoded.info.get("exif"), "fixture must contain metadata to strip")
+                self.assertEqual(encoded.getexif().get(270), "synthetic private metadata")
+            original_bytes = source.read_bytes()
+            photos.convert(source, destination)
+        self.assertEqual(source.read_bytes(), original_bytes, "conversion must preserve the original")
+        self.assertEqual(photos.validate_webp(destination), {"width": 16, "height": 32})
+        with Image.open(destination) as converted:
+            self.assertFalse(any(converted.info.get(key) for key in ("exif", "xmp", "icc_profile")))
+            red = converted.getpixel((8, 4))
+            blue = converted.getpixel((8, 28))
+            self.assertGreater(red[0], red[2] + 100)
+            self.assertGreater(blue[2], blue[0] + 100)
+
 
 if __name__ == "__main__":
     unittest.main()
