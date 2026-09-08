@@ -243,3 +243,70 @@ was performed. Fresh queue/recovery admission, a governed registry result,
 candidate closure realization and comparison still precede the attended
 direct-local switch. The documentation change passed `git diff --check` and
 `just secrets-scan-dir`; no new runtime test result is claimed.
+
+## Follow-through — September 8, switch readiness
+
+**Source preparation is complete; switch dispatch is not ready.** The operator
+can pass the exact candidate below to the parallel lab agent for closure
+preparation and recovery planning, not activation.
+
+One result read found publisher run 34266512240 **failed** its final PR-head
+check (`candidate PR head changed`, exit 2), after creating registry commit
+`0b276f8f1cfafa1419db235557e23bd2c8128454`. Independent API evidence verifies
+its GitHub signature, sole parent `32c05ad4cb729a9848712313ab0679672cab80d9`,
+and sole changed path `config/nix-private-input-cache.json`. Archive asset
+551118294 and provenance asset 551118320 are uploaded; streamed bytes match
+the hashes in that signed registry. Parsed provenance binds the intended
+`82a42340be78e17da66944c6a5fa4db0613572ca` source and locked NAR hash, PR
+1691, expected parent, publisher run and archive ID. The workflow remains
+failed; these independently verified side effects are not a successful final
+workflow receipt. No retry or policy relaxation was needed.
+
+Lab's local `deploy/gdrive-neo-reliability-20260908` now points to signed
+`478e9067ca578bbdfc986da0b7caecf0fa880627`, carrying the registry commit with
+`cherry-pick -S -x` provenance. Its registry bytes match the publisher exactly.
+Relative to the observed active source `3bdf581ad78664b1c11107ce3c25228d16964cbd`,
+the cumulative diff contains seven paths: the prior six plus the registry.
+Only the gdrive lock node changes; `nix/secrets`, `.sops.yaml` and `flake.nix`
+remain identical. This local branch is not pushed or activated.
+
+Candidate verification passed without builds: the existing private-input
+`audit` binary returned `ok: true` for all four registered inputs; the existing
+registered Home Manager wrapper evaluation rendered all 24 assertions `ok`;
+agent-note lint and whitespace checks passed. None proves a realized Darwin
+activation closure. The clean temporary worktree was removed; the local branch
+remains available in `/Users/jess/git/lab`. Other seats' primary-lab edits
+remain untouched.
+
+At 19:24:51Z, Neo's memory pressure improved to level 1, CPU was 76% idle,
+and swap use was 5069.94 MiB. TinylandSSD's exact expected UUID was present,
+writable, with 2746442932224 bytes free. Generation 25 remained active with
+old gdrive source `154aca2`, NFS `timeo=100`/`retrans=5`, and watchdog
+threshold 2/floor 900. Mount PID 9507 was in kernel wait. The single strict
+queue query timed out after 12007 ms with zero bytes: uploads, errors and
+out-of-space state remain unknown.
+
+A nonblocking socket-ownership check linked the RC socket to PID 9507.
+That is not responsiveness. Rclone's pinned
+[cache statistics](https://github.com/rclone/rclone/blob/v1.75.0/vfs/vfscache/cache.go#L140)
+depend on live state; historical cleaner logs, free space and on-disk dirty
+metadata do not establish a current complete drain verdict.
+
+The parallel lab agent's next work is to realize and compare this exact
+candidate without heavy local compilation, then reconcile pending uploads.
+The existing `just nix-switch-local` enables one or two local build jobs;
+do not use it as the first closure-build attempt on Neo. If read-only recovery
+evidence remains incomplete, obtain explicit cache-preserving recovery
+authorization before coordinating writers/watchdog and replacing the mount.
+Preserve both VFS data and metadata and never run two processes against the
+same cache; [rclone's recovery mechanism](https://rclone.org/commands/rclone_mount/#vfs-file-caching)
+is not proof that this restart is already safe. No switch, signal, remount or
+live photo operation occurred in this pass.
+
+The operator also requested a separate completion notice for GFTB deduplication
+and its authoritative absolute path. The intended Neo path is
+`/Users/jess/GDrive/sulliwood/GFTB Stuff`; it is not yet a newly verified SSOT
+receipt. Completion must report the actual mounted absolute path and canonical
+Drive folder ID, content/curation verification, a no-op rerun, unresolved items,
+and the result of exact-manifest-approved duplicate retirement. The local SSD
+photo source and VFS cache must not be confused with that canonical location.
