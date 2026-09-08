@@ -58,6 +58,9 @@ here), prompt-toon (agent-output shaping conventions).
   delivery uses an attended `just nix-switch-local 'jess@macbook-neo'`
   from a reviewed candidate, with source and active-generation verification.
   A configured daily switch is not evidence that delivery happened.
+  Communicate with the parallel lab agent only when switch readiness is
+  established by exact candidate/closure and upload-safety evidence. Do not
+  send interim preparation or status-relay requests (operator: 2026-09-08).
 - `finances` — session-notes home only; otherwise unrelated.
 - `tummycrypt` — the long-term successor (TCFS). See `docs/position.md`.
 
