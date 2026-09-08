@@ -703,6 +703,153 @@ def unique_path(desired, sha, occupied):
     raise Refusal("content-addressed destination is still ambiguous")
 
 
+def _derive_alias_bindings(plan):
+    """Derive private traceability only from already-recorded byte evidence.
+
+    Remote WebP aliases are limited to evidenced keeper/retirement rows. This
+    map does not discover other remote duplicates or establish their lineage.
+    """
+    entries = plan["entries"]
+    keyed = {entry["key"]: entry for entry in entries}
+    if len(keyed) != len(entries):
+        raise Refusal("alias bindings require unique canonical entry keys")
+    inventory = {row["id"]: row for row in plan["remote_inventory"]}
+    if len(inventory) != len(plan["remote_inventory"]):
+        raise Refusal("alias bindings require unique inventory Drive IDs")
+    originals = [entry for entry in entries if entry["kind"] == "original"]
+    if len({entry["sha256"] for entry in originals}) != len(originals):
+        raise Refusal("alias bindings require one original entry per SHA256")
+    local_originals, retirements = {}, {}
+    for path, value in plan["local"].items():
+        if path.startswith("originals/"):
+            local_originals.setdefault(value["sha256"], []).append(path)
+    for item in plan["retirement"]:
+        if item["reason"] == "verified-webp-copy":
+            canonical_entry = keyed.get(item["canonical_key"])
+            if (canonical_entry is None or canonical_entry["kind"] != "webp" or
+                    canonical_entry["recipe"].get("operation") != "adopt-corrected-webp"):
+                raise Refusal("accepted WebP duplicate has no accepted canonical entry")
+        retirements.setdefault(item["canonical_key"], []).append(item)
+    derivatives = {}
+    for entry in entries:
+        if entry["kind"] != "webp":
+            continue
+        original = keyed.get(entry["original_key"])
+        if (original is None or original["kind"] != "original" or
+                entry["recipe"].get("source_original_sha256") != original["sha256"]):
+            raise Refusal("alias WebP linkage does not match its canonical original")
+        if original["key"] in derivatives:
+            raise Refusal("alias bindings require one accepted WebP entry per original")
+        derivatives[original["key"]] = entry
+
+    bindings = {}
+
+    def add(origin, role, path, identifier, sha, original, webp):
+        relative(path)
+        if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha):
+            raise Refusal("alias byte evidence must be a full SHA256")
+        row = {"origin": origin, "role": role, "path": path, "drive_id": identifier,
+               "sha256": sha, "original_sha256": original["sha256"],
+               "original_key": original["key"], "webp_key": webp["key"] if webp else None}
+        identity = (origin, path, identifier)
+        if identity in bindings and bindings[identity] != row:
+            raise Refusal("one alias has conflicting canonical original evidence")
+        bindings[identity] = row
+
+    def add_remote(row, role, sha, original, webp):
+        if not isinstance(row.get("id"), str) or not row["id"] or inventory.get(row["id"]) != row:
+            raise Refusal("alias Drive identity differs from the immutable inventory")
+        add("drive", role, row["path"], row["id"], sha, original, webp)
+
+    for original in originals:
+        sha = original["sha256"]
+        webp = derivatives.get(original["key"])
+        local_paths = sorted(local_originals.get(sha, []))
+        original_alias_paths = {str(PurePosixPath(path).relative_to("originals")) for path in local_paths}
+        for path in local_paths:
+            add("ssd", "original", path, None, sha, original, webp)
+        keeper = original["source"]["remote"]
+        if keeper is not None:
+            if keeper["id"] != original["keep_id"]:
+                raise Refusal("original alias keeper differs from its canonical Drive ID")
+            add_remote(keeper, "original", sha, original, webp)
+            original_alias_paths.add(keeper["path"])
+        elif original["keep_id"] is not None:
+            raise Refusal("original alias keeper lacks inventory provenance")
+        if not local_paths and keeper is None:
+            raise Refusal("canonical original has no proven source alias")
+        for item in retirements.get(original["key"], []):
+            if item["reason"] != "verified-original-copy" or item["sha256"] != sha:
+                raise Refusal("retired original alias lacks byte-equivalent evidence")
+            add_remote(item["row"], "original", sha, original, webp)
+            original_alias_paths.add(item["row"]["path"])
+
+        if webp is None or webp["recipe"].get("operation") != "adopt-corrected-webp":
+            continue  # Missing/blocked/generated derivatives are not accepted source aliases.
+        adopted = webp["source"]["local"]
+        candidates = {str(PurePosixPath("webp") / PurePosixPath(path).relative_to("originals").with_suffix(".webp"))
+                      for path in local_paths if PurePosixPath(path).suffix.lower() in PHOTO_EXTENSIONS}
+        # Positive reuse follows proven original aliases, not a future
+        # content-suffixed name synthesized by collision reconciliation.
+        remote_candidates = {str(PurePosixPath("webp") / PurePosixPath(path).with_suffix(".webp")).casefold()
+                             for path in original_alias_paths}
+        if adopted not in candidates or adopted not in plan["local"] or plan["local"][adopted]["sha256"] != webp["sha256"]:
+            raise Refusal("accepted WebP alias lacks its original and local byte evidence")
+        for path in sorted(candidates):
+            if path in plan["local"]:
+                if plan["local"][path]["sha256"] != webp["sha256"]:
+                    raise Refusal("accepted WebP aliases contain conflicting byte evidence")
+                add("ssd", "accepted-webp", path, None, webp["sha256"], original, webp)
+        if webp["keep_id"] is not None:
+            keeper = inventory.get(webp["keep_id"])
+            if (keeper is None or keeper["path"].casefold() not in remote_candidates or
+                    keeper["path"] != webp["path"]):
+                raise Refusal("accepted WebP keeper lacks matching inventory provenance")
+            add_remote(keeper, "accepted-webp", webp["sha256"], original, webp)
+        for item in retirements.get(webp["key"], []):
+            if item["reason"] == "verified-webp-copy" and item["sha256"] != webp["sha256"]:
+                raise Refusal("accepted WebP duplicate lacks byte-equivalent evidence")
+            if item["sha256"] != webp["sha256"]:
+                continue  # Superseded different-byte outputs are not aliases.
+            if (item["reason"] not in {"superseded-webp", "verified-webp-copy"} or
+                    item["row"]["path"].casefold() not in remote_candidates):
+                raise Refusal("accepted WebP duplicate lacks matching inventory provenance")
+            add_remote(item["row"], "accepted-webp", webp["sha256"], original, webp)
+    return sorted(bindings.values(), key=lambda row: (row["origin"], row["path"], row["drive_id"] or ""))
+
+
+def validate_alias_bindings(plan):
+    """Check a complete deterministic map; legacy plans carry no alias evidence."""
+    if "alias_bindings_version" not in plan and "alias_bindings" not in plan:
+        return
+    if type(plan.get("alias_bindings_version")) is not int or plan["alias_bindings_version"] != 1:
+        raise Refusal("unsupported or incomplete alias bindings version")
+    if not isinstance(plan.get("alias_bindings"), list):
+        raise Refusal("alias bindings must be a private ordered list")
+    try:
+        expected = _derive_alias_bindings(plan)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise Refusal("alias bindings have incomplete provenance evidence") from None
+    if plan["alias_bindings"] != expected:
+        raise Refusal("alias bindings differ from canonical inventory and byte evidence")
+
+
+def alias_candidates(plan, reference):
+    """Return all original keys for a literal path or a bare basename/stem.
+
+    This resolves no curation grammar or publication policy. A bare token must
+    include nested aliases even if a root-level alias also matches exactly.
+    """
+    validate_alias_bindings(plan)
+    relative(reference)
+    matches = set()
+    for row in plan.get("alias_bindings", []):
+        path = PurePosixPath(row["path"])
+        if (row["path"] == reference if "/" in reference else reference in {path.name, path.stem}):
+            matches.add(row["original_key"])
+    return sorted(matches)
+
+
 def make_plan(source_root, mount_point, remote, validator=validate_webp):
     source_root = Path(source_root)
     local = local_inventory(source_root)
@@ -787,6 +934,14 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
         if len(candidate_hashes) > 1:
             raise Refusal("same original has conflicting corrected WebP candidates")
         adopted = sorted(candidates)[0] if candidates else None
+        # Positive reuse is limited to derivative paths of byte-proven source
+        # aliases, not synthesized names or unrelated equal-byte WebPs.
+        source_paths = {*(r["path"] for r in group["remote"]),
+                        *(str(PurePosixPath(p).relative_to("originals")) for p in group["local"])}
+        derivative_paths = {str(PurePosixPath("webp") / PurePosixPath(p).with_suffix(".webp")).casefold()
+                            for p in source_paths}
+        alias_outputs = [r for path in sorted(derivative_paths) for r in by_path.get(path, [])
+                         if r["id"] in hashes]
         if adopted:
             # Same-stem, different-original formats cannot claim one derivative.
             stems = [p for p in local if p.startswith("originals/") and PurePosixPath(p).suffix.lower() in PHOTO_EXTENSIONS and
@@ -802,11 +957,9 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             # A missing SSD derivative is not evidence that Drive lacks the
             # accepted correction. Check every known original alias, including
             # its pre-collision name, before proposing an EXIF-only re-encode.
-            source_paths = {original["path"], *(r["path"] for r in group["remote"]),
-                            *(str(PurePosixPath(p).relative_to("originals")) for p in group["local"])}
-            derivative_paths = {str(PurePosixPath("webp") / PurePosixPath(p).with_suffix(".webp")).casefold()
-                                for p in source_paths}
-            existing = [r for path in sorted(derivative_paths) for r in by_path.get(path, [])
+            missing_output_paths = derivative_paths | {
+                str(PurePosixPath("webp") / PurePosixPath(original["path"]).with_suffix(".webp")).casefold()}
+            existing = [r for path in sorted(missing_output_paths) for r in by_path.get(path, [])
                         if r["id"] in hashes]
             if existing:
                 evidence = ", ".join(f"{r['path']} (ID {r['id']}, SHA256 {hashes[r['id']]})"
@@ -818,9 +971,11 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             wanted = str(PurePosixPath("webp") / PurePosixPath(original["path"]).with_suffix(".webp"))
             recipe = {**RECIPE, "operation": "encode-original",
                       "source_original_sha256": original["sha256"], "codec_versions": codec_versions()}
-        matches = [r for r in by_path.get(wanted.casefold(), []) if hashes.get(r["id"]) == sha]
-        keeper = min(matches, key=lambda r: r["id"]) if matches else None
-        target = wanted if keeper else unique_path(wanted, sha or digest(recipe), occupied)
+        matches = [r for r in alias_outputs if hashes[r["id"]] == sha] if adopted else []
+        keeper = min(matches, key=lambda r: (r["path"] != wanted,
+                                            r["path"].casefold() != wanted.casefold(),
+                                            r["path"], r["id"])) if matches else None
+        target = keeper["path"] if keeper else unique_path(wanted, sha or digest(recipe), occupied)
         entry = {"kind": "webp", "path": target, "sha256": sha, "recipe": recipe,
                  "source": {"local": adopted, "remote": None},
                  "original_key": original["key"], "keep_id": keeper["id"] if keeper else None}
@@ -830,6 +985,10 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             if row["id"] in hashes and row["id"] != entry["keep_id"]:
                 retirement[row["id"]] = {"row": row, "sha256": hashes[row["id"]],
                                          "reason": "superseded-webp", "canonical_key": entry["key"]}
+        for row in matches:
+            if row["id"] != entry["keep_id"]:
+                retirement[row["id"]] = {"row": row, "sha256": sha,
+                                         "reason": "verified-webp-copy", "canonical_key": entry["key"]}
     for name in ("orientation-judged.csv", "design-picks.md"):
         if name in local and f"webp/{name}" in local and local[name]["sha256"] != local[f"webp/{name}"]["sha256"]:
             blockers.append(f"conflicting provenance copies: {name}")
@@ -854,19 +1013,28 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
         extra = sorted(r["name"] for r in rows if r.get("name") not in names)
         if extra:
             warnings.append("orientation provenance contains non-source rows: " + ", ".join(extra))
+    # A proven alias can reuse another original's wanted output pathname.
+    # That keeper must not also be superseded by the second original's
+    # different accepted bytes. Keep both canonical outputs; the runtime
+    # retirement guard remains an independent last line of defense.
+    canonical_ids = {entry["keep_id"] for entry in entries if entry["keep_id"] is not None}
+    retirement = {identifier: item for identifier, item in retirement.items() if identifier not in canonical_ids}
     covered = {e["sha256"] for e in entries if e["sha256"]}
     local_retirement = [p for p in sorted(local) if PurePosixPath(p).parts[0] in RETIRABLE_DIRS
                         and local[p]["sha256"] in covered]
     unresolved = [{"path": p, "reason": "no verified canonical byte-equivalent; preserve locally"}
                   for p in sorted(local) if PurePosixPath(p).parts[0] in RETIRABLE_DIRS and p not in local_retirement]
     source_stat = source_root.stat()
-    return {"version": 1, "org": ORG, "created_at": time.time(), "source_root": str(source_root.absolute()),
+    plan = {"version": 1, "org": ORG, "created_at": time.time(), "source_root": str(source_root.absolute()),
             "source_identity": {"dev": source_stat.st_dev, "ino": source_stat.st_ino},
             "mount_point": str(Path(mount_point).absolute()), "drive_root_id": root_id,
             "local": local, "remote_inventory": inventory, "entries": entries,
             "retirement": sorted(retirement.values(), key=lambda r: r["row"]["id"]),
             "local_retirement": local_retirement, "unresolved": unresolved,
             "warnings": warnings, "blockers": blockers}
+    plan["alias_bindings_version"] = 1
+    plan["alias_bindings"] = _derive_alias_bindings(plan)
+    return plan
 
 
 @contextlib.contextmanager
@@ -916,6 +1084,7 @@ def namespace(plan, remote):
 
 
 def apply_plan(plan, key, state, remote, mount, encoder=convert, validator=validate_webp):
+    validate_alias_bindings(plan)
     if plan.get("blockers"):
         raise Refusal("plan contains unresolved provenance decisions")
     namespace(plan, remote)
@@ -1091,6 +1260,7 @@ def journaled_canonical(entry, expected_sha, events):
 
 
 def verify_plan(plan, key, state, remote):
+    validate_alias_bindings(plan)
     if plan.get("blockers"):
         raise Refusal("plan contains unresolved provenance decisions")
     remote.uploads_empty()
@@ -1132,7 +1302,9 @@ def verify_plan(plan, key, state, remote):
         verified[entry["key"]] = {"id": found[0]["id"], "sha256": expected,
                                   "path": entry["path"], "row": found[0]}
     remote.uploads_empty()
-    state.event(key, "verified", entries=verified)
+    alias_evidence = ({"alias_bindings_sha256": digest(plan["alias_bindings"])}
+                      if "alias_bindings_version" in plan else {})
+    state.event(key, "verified", entries=verified, **alias_evidence)
     return verified
 
 

@@ -383,3 +383,56 @@ mount or watchdog stop and no activation. Request the exact closure and bounded
 graceful-recovery steps before a separate recovery decision. The quoted options
 are not a selection or recovery authorization. A graceful-stop/unmount failure
 must not silently escalate into force-unmount, cache clearing or retries.
+
+## Alias traceability and accepted-output reuse
+
+The next offline pass adds a versioned private alias map to new manifests.
+Original and accepted-WebP aliases bind original SHA256 values to canonical
+entry keys; remote aliases retain their original path and Drive ID after
+renaming or quarantine. Verification records the map's digest alongside
+canonical ID/hash evidence. Unknown scratch files and superseded
+different-byte derivatives are not promoted into accepted lineage. Generated
+outputs remain linked to their original and recipe until prepared/verified
+journal evidence establishes the output hash. Legacy manifests can resume
+without claiming alias evidence they never recorded.
+
+A reproduced positive-dedupe gap is also fixed: when accepted local WebP
+bytes already exist on Drive under another proven original alias, the planner
+keeps that existing object and its actual path. It prefers an existing copy at
+the adopted filename, then chooses deterministically among matching aliases.
+Other same-byte proven-alias outputs become explicit `verified-webp-copy`
+retirement candidates. Different-byte outputs at other aliases and unmapped
+equal-byte files remain preserved; the prior wanted-path supersession policy
+is unchanged. Retirement still requires separate exact-manifest approval.
+
+Review also found a cross-original keeper/supersession collision: one
+original's reused alias could be scheduled for retirement by another
+original's different-byte wanted output. The existing final keeper-ID guard
+prevented canonical removal but left that plan unable to complete. The planner
+now excludes every canonical keeper ID from retirement before saving the plan,
+while retaining the runtime guard. A full synthetic apply/retire/verify case
+proves both distinct accepted outputs survive and retirement completes.
+
+The registered `just test-photos` run completed with 110 tests: 108 passed and
+two ambient native-codec fixtures skipped. New synthetic coverage exercises
+selected/restricted non-keeper aliases after quarantine, pre-rename IDs,
+ambiguous bare names across directories, invalid binding evidence, generated
+output linkage, legacy resume, zero-write existing-WebP reuse, deterministic
+keeper selection and same-byte alias retirement. These tests do not inspect
+or interpret the actual curation sidecars and are not live or Darwin codec
+acceptance.
+
+A bounded tracked-history check found only the earlier relative-path and
+extension-mirroring convention, not the actual selection/restriction grammar
+or authoritative rows. The proposed August 22 acceptance receipt was absent
+from the tracked tree and its exact-path history. No parser or historical
+count was invented. The operator was asked for existing off-mount copies of
+`orientation-judged.csv` and `design-picks.md`, without touching the wedged
+mount to obtain them. Bare-name alias lookup returns all candidates rather
+than silently choosing a root-level file; actual grammar and missing or
+ambiguous references remain acceptance work before live publication.
+
+No live mount/corpus read, upload, cache change, recovery, switch or runtime
+build occurred in this pass. The separate lab lane still needs to return an
+exact closure and proposed bounded recovery sequence; the relayed question
+does not authorize recovery. Neither SWITCH READY nor GFTB COMPLETE is claimed.

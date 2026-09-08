@@ -659,6 +659,195 @@ class PhotosTests(unittest.TestCase):
         self.assertTrue(any("missing_placeholder" in w for w in plan["warnings"]))
         self.assertEqual(len([e for e in plan["entries"] if e["kind"] == "provenance"]), 2)
 
+    def test_selected_and_restricted_nonkeeper_aliases_survive_retirement(self):
+        # Opaque fixture text, not an invented parser for the live sidecars.
+        curation = b"Selected: selected-alias.webp\nDo not publish: restricted-alias.webp\n"
+        (self.source / "design-picks.md").write_bytes(curation)
+        for alias in ("selected-alias", "restricted-alias"):
+            (self.source / f"originals/{alias}.HEIC").write_bytes(b"synthetic-original-one")
+            (self.source / f"webp/{alias}.webp").write_bytes(b"synthetic-corrected-webp")
+        plan, key = self.plan()
+        original = next(e for e in plan["entries"] if e["kind"] == "original")
+        derivative = next(e for e in plan["entries"] if e["kind"] == "webp")
+        self.assertEqual(plan["alias_bindings_version"], 1)
+        for alias in ("selected-alias", "restricted-alias"):
+            binding = next(b for b in plan["alias_bindings"] if b["origin"] == "ssd" and
+                           b["path"] == f"webp/{alias}.webp")
+            self.assertEqual(binding["role"], "accepted-webp")
+            self.assertEqual(binding["original_key"], original["key"])
+            self.assertEqual(binding["webp_key"], derivative["key"])
+            self.assertEqual(binding["original_sha256"], original["sha256"])
+            self.assertEqual(binding["sha256"], derivative["sha256"])
+            self.assertEqual(photos.alias_candidates(plan, f"{alias}.webp"), [original["key"]])
+        self.apply(plan, key)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        for alias in ("selected-alias", "restricted-alias"):
+            self.assertFalse((self.source / f"webp/{alias}.webp").exists())
+            self.assertEqual(photos.alias_candidates(plan, f"{alias}.webp"), [original["key"]])
+        self.assertEqual((self.source / "design-picks.md").read_bytes(), curation)
+        preserved = next(row for row in self.remote.rows.values() if row["path"] == "webp/design-picks.md")
+        self.assertEqual(self.remote.payloads[preserved["id"]], curation)
+        proof = [e for e in self.state.events(key) if e["event"] == "verified"][-1]
+        self.assertEqual(proof["alias_bindings_sha256"], photos.digest(plan["alias_bindings"]))
+        self.assertEqual(proof["entries"][derivative["key"]]["sha256"], derivative["sha256"])
+
+    def test_remote_alias_binding_keeps_pre_retirement_id_and_path(self):
+        alias = self.remote.add("alias.HEIC", b"synthetic-original-one", "retired-alias-id")
+        plan, key = self.plan()
+        binding = next(b for b in plan["alias_bindings"] if b["drive_id"] == alias["id"])
+        self.assertEqual((binding["origin"], binding["role"], binding["path"]),
+                         ("drive", "original", "alias.HEIC"))
+        self.apply(plan, key)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertIn((key, alias["id"]), self.remote.quarantined)
+        self.assertEqual(binding["drive_id"], "retired-alias-id")
+        self.assertEqual(photos.alias_candidates(plan, "alias.HEIC"), [binding["original_key"]])
+
+    def test_existing_accepted_remote_alias_is_reused_without_new_webp_write(self):
+        self.remote.add("alias.HEIC", b"synthetic-original-one", "alias-original")
+        accepted = self.remote.add("webp/alias.webp", b"synthetic-corrected-webp", "accepted-alias")
+        plan, key = self.plan()
+        output = next(e for e in plan["entries"] if e["kind"] == "webp")
+        self.assertEqual((output["keep_id"], output["path"]), (accepted["id"], accepted["path"]))
+        self.apply(plan, key)
+        self.assertEqual(self.mount.writes, 0)
+        self.assertFalse(any(row["path"] == "webp/a.webp" for row in self.remote.rows.values()))
+        proof = photos.verify_plan(plan, key, self.state, self.remote)
+        self.assertEqual(proof[output["key"]]["id"], accepted["id"])
+        self.assertEqual(photos.alias_candidates(plan, "alias.webp"), [output["original_key"]])
+
+    def test_known_same_byte_remote_alias_retires_to_existing_canonical_id(self):
+        self.remote.add("alias.HEIC", b"synthetic-original-one", "alias-original")
+        keep = self.remote.add("webp/a.webp", b"synthetic-corrected-webp", "accepted-keeper")
+        duplicate = self.remote.add("webp/alias.webp", b"synthetic-corrected-webp", "accepted-duplicate")
+        plan, key = self.plan()
+        output = next(e for e in plan["entries"] if e["kind"] == "webp")
+        item = next(r for r in plan["retirement"] if r["row"]["id"] == duplicate["id"])
+        self.assertEqual(item["reason"], "verified-webp-copy")
+        self.assertEqual(item["canonical_key"], output["key"])
+        self.apply(plan, key)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertIn(keep["id"], self.remote.rows)
+        self.assertIn((key, duplicate["id"]), self.remote.quarantined)
+        self.assertEqual(len([r for r in self.remote.rows.values() if r["path"].endswith(".webp")]), 1)
+        self.assertEqual(photos.alias_candidates(plan, "alias.webp"), [output["original_key"]])
+        binding = next(b for b in plan["alias_bindings"] if b["drive_id"] == duplicate["id"])
+        self.assertEqual(binding["webp_key"], output["key"])
+        proof = photos.verify_plan(plan, key, self.state, self.remote)
+        self.assertEqual(proof[output["key"]]["id"], keep["id"])
+
+    def test_reused_webp_keeper_cannot_be_superseded_by_another_original(self):
+        (self.source / "originals/b.HEIC").write_bytes(b"distinct original B")
+        (self.source / "webp/b.webp").write_bytes(b"accepted output B")
+        self.remote.add("b.JPG", b"synthetic-original-one", "original-a-alias")
+        self.remote.add("b.HEIC", b"distinct original B", "original-b")
+        keeper = self.remote.add("webp/b.webp", b"synthetic-corrected-webp", "accepted-a-alias")
+        plan, key = self.plan()
+        self.assertEqual(plan["blockers"], [])
+        self.assertFalse(any(item["row"]["id"] == keeper["id"] for item in plan["retirement"]))
+        outputs = [entry for entry in plan["entries"] if entry["kind"] == "webp"]
+        self.assertEqual(len(outputs), 2)
+        kept = next(entry for entry in outputs if entry["keep_id"] == keeper["id"])
+        other = next(entry for entry in outputs if entry["key"] != kept["key"])
+        self.assertEqual(kept["path"], "webp/b.webp")
+        self.assertNotEqual(other["path"], kept["path"])
+        self.apply(plan, key)
+        photos.retire_plan(plan, key, key, self.state, self.remote)
+        self.assertIn(keeper["id"], self.remote.rows)
+        self.assertNotIn((key, keeper["id"]), self.remote.quarantined)
+        proof = photos.verify_plan(plan, key, self.state, self.remote)
+        self.assertEqual(proof[kept["key"]]["id"], keeper["id"])
+        self.assertNotEqual(proof[other["key"]]["id"], keeper["id"])
+        self.assertEqual({proof[entry["key"]]["sha256"] for entry in outputs},
+                         {hashlib.sha256(content).hexdigest() for content in
+                          (b"synthetic-corrected-webp", b"accepted output B")})
+
+    def test_bare_alias_does_not_prefer_root_over_distinct_nested_original(self):
+        (self.source / "originals/album").mkdir()
+        (self.source / "webp/album").mkdir()
+        (self.source / "originals/album/a.HEIC").write_bytes(b"different nested original")
+        (self.source / "webp/album/a.webp").write_bytes(b"different nested accepted derivative")
+        plan, _ = self.plan()
+        originals = {e["key"] for e in plan["entries"] if e["kind"] == "original"}
+        self.assertEqual(len(originals), 2)
+        for reference in ("a", "a.HEIC", "a.webp"):
+            self.assertEqual(set(photos.alias_candidates(plan, reference)), originals)
+        exact = photos.alias_candidates(plan, "originals/album/a.HEIC")
+        self.assertEqual(len(exact), 1)
+        nested = next(e for e in plan["entries"] if e["path"] == "album/a.HEIC")
+        self.assertEqual(exact, [nested["key"]])
+
+    def test_pre_rename_aliases_keep_distinct_original_hashes(self):
+        other = self.remote.add("a.HEIC", b"different bytes at same pathname", "z-other-original")
+        plan, _ = self.plan()
+        bindings = [b for b in plan["alias_bindings"] if b["origin"] == "drive" and b["path"] == "a.HEIC"]
+        self.assertEqual({b["drive_id"] for b in bindings}, {"original-a", other["id"]})
+        self.assertEqual(len({b["original_sha256"] for b in bindings}), 2)
+        renamed = next(e for e in plan["entries"] if e.get("keep_id") == other["id"])
+        self.assertNotEqual(renamed["path"], "a.HEIC")
+        binding = next(b for b in bindings if b["drive_id"] == other["id"])
+        self.assertEqual(binding["original_key"], renamed["key"])
+        self.assertEqual(len(photos.alias_candidates(plan, "a.HEIC")), 2)
+
+    def test_alias_binding_consistency_refuses_wrong_keys_hashes_and_identities(self):
+        plan, _ = self.plan()
+        cases = (("original_key", "missing-entry"), ("webp_key", "missing-entry"),
+                 ("sha256", "0" * 64), ("original_sha256", "0" * 64),
+                 ("origin", "unknown-source"), ("path", "unobserved/original.HEIC"),
+                 ("drive_id", "substituted-id"))
+        for field, value in cases:
+            altered = json.loads(json.dumps(plan))
+            binding = next(b for b in altered["alias_bindings"] if b["origin"] == "drive")
+            binding[field] = value
+            with self.subTest(field=field), self.assertRaises(photos.Refusal):
+                photos.validate_alias_bindings(altered)
+        altered = json.loads(json.dumps(plan))
+        altered["alias_bindings"].append(dict(altered["alias_bindings"][0]))
+        with self.assertRaises(photos.Refusal):
+            photos.validate_alias_bindings(altered)
+
+    def test_unknown_scratch_and_superseded_outputs_are_not_accepted_aliases(self):
+        (self.source / "tmp").mkdir()
+        (self.source / "tmp/scratch.webp").write_bytes(b"unproven scratch output")
+        old = self.remote.add("webp/a.webp", b"superseded derivative", "superseded-id")
+        plan, _ = self.plan()
+        self.assertFalse(any(b["path"] == "tmp/scratch.webp" for b in plan["alias_bindings"]))
+        self.assertFalse(any(b["drive_id"] == old["id"] for b in plan["alias_bindings"]))
+
+    def test_generated_derivative_alias_binds_recipe_then_verified_output(self):
+        (self.source / "webp/a.webp").unlink()
+        plan, key = self.plan()
+        derivative = next(e for e in plan["entries"] if e["kind"] == "webp")
+        self.assertIsNone(derivative["sha256"])
+        self.assertTrue(all(b["role"] == "original" for b in plan["alias_bindings"]))
+        self.assertTrue(all(b["webp_key"] == derivative["key"] for b in plan["alias_bindings"]))
+        self.apply(plan, key, encoder=lambda _src, dst: dst.write_bytes(b"generated output"))
+        verified = photos.verify_plan(plan, key, self.state, self.remote)
+        self.assertEqual(verified[derivative["key"]]["sha256"], hashlib.sha256(b"generated output").hexdigest())
+        proof = [e for e in self.state.events(key) if e["event"] == "verified"][-1]
+        self.assertEqual(proof["alias_bindings_sha256"], photos.digest(plan["alias_bindings"]))
+
+    def test_legacy_manifest_resumes_without_claiming_alias_evidence(self):
+        plan, _ = self.plan()
+        plan.pop("alias_bindings")
+        plan.pop("alias_bindings_version")
+        key = self.state.save(plan)
+        photos.validate_alias_bindings(plan)
+        self.apply(plan, key)
+        photos.verify_plan(plan, key, self.state, self.remote)
+        proof = [e for e in self.state.events(key) if e["event"] == "verified"][-1]
+        self.assertNotIn("alias_bindings_sha256", proof)
+
+    def test_partial_or_unknown_alias_schema_refused(self):
+        plan, _ = self.plan()
+        for missing in ("alias_bindings", "alias_bindings_version"):
+            altered = {k: v for k, v in plan.items() if k != missing}
+            with self.subTest(missing=missing), self.assertRaises(photos.Refusal):
+                photos.validate_alias_bindings(altered)
+        altered = {**plan, "alias_bindings_version": 900}
+        with self.assertRaises(photos.Refusal):
+            photos.validate_alias_bindings(altered)
+
     def test_relative_paths_reject_traversal(self):
         for path in ("../a", "/a", "a/../b", "a//b", "a/./b", "a\\b", ""):
             with self.subTest(path=path), self.assertRaises(photos.Refusal):

@@ -390,6 +390,81 @@ class RemoteAdapterTests(unittest.TestCase):
         validator.assert_called_once_with(Path("/synthetic/photos/webp/a.webp"))
         codecs.assert_not_called()
 
+    def test_plan_reuses_accepted_remote_webp_at_proven_original_alias(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        original_alias = {**object_row("original-alias", "b.HEIC"), "path": "b.HEIC"}
+        output = {**object_row("accepted-alias", "b.webp", mime="image/webp"), "path": "webp/b.webp"}
+        plan, _, codecs = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}, "webp/a.webp": {"sha256": corrected_sha}},
+            [self.row, original_alias, output],
+            {self.row["id"]: original_sha, original_alias["id"]: original_sha, output["id"]: corrected_sha})
+        entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+        self.assertEqual(plan["blockers"], [])
+        self.assertEqual((entry["path"], entry["keep_id"]), ("webp/b.webp", "accepted-alias"))
+        self.assertEqual(entry["source"]["local"], "webp/a.webp")
+        self.assertFalse(any(item["row"]["id"] == "accepted-alias" for item in plan["retirement"]))
+        codecs.assert_not_called()
+
+    def test_plan_prefers_adopted_path_and_retires_equal_byte_alias_derivatives(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        outputs = [{**object_row(identifier, Path(path).name, mime="image/webp"), "path": path}
+                   for identifier, path in (("z-wanted", "webp/a.webp"), ("a-alias", "webp/b.webp"))]
+        plan, _, _ = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}, "originals/b.HEIC": {"sha256": original_sha},
+             "webp/a.webp": {"sha256": corrected_sha}},
+            [self.row, *outputs], {self.row["id"]: original_sha, **{row["id"]: corrected_sha for row in outputs}})
+        entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+        self.assertEqual((entry["path"], entry["keep_id"]), ("webp/a.webp", "z-wanted"))
+        self.assertEqual([(item["row"]["id"], item["reason"], item["sha256"], item["canonical_key"])
+                          for item in plan["retirement"]],
+                         [("a-alias", "verified-webp-copy", corrected_sha, entry["key"])])
+
+    def test_plan_alias_webp_fallback_is_deterministic_by_existing_path_and_id(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        outputs = [{**object_row(identifier, Path(path).name, mime="image/webp"), "path": path}
+                   for identifier, path in (("z-at-b", "webp/b.webp"), ("a-at-b", "webp/b.webp"),
+                                            ("0-at-c", "webp/c.webp"))]
+        local = {f"originals/{name}.HEIC": {"sha256": original_sha} for name in ("a", "b", "c")}
+        local["webp/a.webp"] = {"sha256": corrected_sha}
+        for rows in ([self.row, *outputs], [*reversed(outputs), self.row]):
+            with self.subTest(order=[row["id"] for row in rows]):
+                plan, _, _ = self.plan_without_photo_io(
+                    local, rows, {self.row["id"]: original_sha, **{row["id"]: corrected_sha for row in outputs}})
+                entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+                self.assertEqual((entry["path"], entry["keep_id"]), ("webp/b.webp", "a-at-b"))
+                self.assertEqual({item["row"]["id"] for item in plan["retirement"]}, {"z-at-b", "0-at-c"})
+                self.assertTrue(all(item["reason"] == "verified-webp-copy" and
+                                    item["sha256"] == corrected_sha and item["canonical_key"] == entry["key"]
+                                    for item in plan["retirement"]))
+
+    def test_plan_reused_webp_keeps_actual_inventory_path_spelling(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        output = {**object_row("accepted-case", "A.WEBP", mime="image/webp"), "path": "webp/A.WEBP"}
+        plan, _, _ = self.plan_without_photo_io(
+            {"originals/a.HEIC": {"sha256": original_sha}, "webp/a.webp": {"sha256": corrected_sha}},
+            [self.row, output], {self.row["id"]: original_sha, output["id"]: corrected_sha})
+        entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+        self.assertEqual((entry["path"], entry["keep_id"]), ("webp/A.WEBP", "accepted-case"))
+        self.assertEqual(plan["retirement"], [])
+
+    def test_plan_preserves_different_byte_alias_and_unmapped_equal_byte_webps(self):
+        original_sha, corrected_sha = "1" * 64, "2" * 64
+        outputs = [{**object_row(identifier, Path(path).name, mime="image/webp"), "path": path}
+                   for identifier, path in (("obsolete-wanted", "webp/a.webp"), ("accepted-b", "webp/b.webp"),
+                                            ("different-c", "webp/c.webp"), ("unmapped", "webp/000-unmapped.webp"))]
+        local = {f"originals/{name}.HEIC": {"sha256": original_sha} for name in ("a", "b", "c")}
+        local["webp/a.webp"] = {"sha256": corrected_sha}
+        plan, _, _ = self.plan_without_photo_io(
+            local, [self.row, *outputs], {self.row["id"]: original_sha, "obsolete-wanted": "3" * 64,
+                                        "accepted-b": corrected_sha, "different-c": "4" * 64,
+                                        "unmapped": corrected_sha})
+        entry = next(entry for entry in plan["entries"] if entry["kind"] == "webp")
+        self.assertEqual((entry["path"], entry["keep_id"]), ("webp/b.webp", "accepted-b"))
+        self.assertEqual([(item["row"]["id"], item["reason"], item["canonical_key"])
+                          for item in plan["retirement"]],
+                         [("obsolete-wanted", "superseded-webp", entry["key"])])
+        self.assertTrue(all(output in plan["remote_inventory"] for output in outputs))
+
     def test_plan_still_encodes_when_no_matching_remote_derivative_exists(self):
         original_sha = "1" * 64
         unrelated = {**object_row("other-webp", "other.webp", mime="image/webp"), "path": "webp/other.webp"}

@@ -89,6 +89,14 @@ If a corrected WebP exists only on Drive, the planner preserves its ID/hash
 and blocks regeneration pending proven adoption or an orientation decision.
 Missing the SSD derivative is not evidence that the accepted output is absent.
 
+When accepted SSD bytes match a Drive WebP under another proven original
+alias, keep that existing Drive ID/path instead of creating another copy.
+Prefer the adopted filename if an exact-byte copy already exists there;
+otherwise choose an existing matching alias deterministically. Other proven
+same-byte aliases become explicit `verified-webp-copy` retirement candidates.
+Different-byte outputs at other aliases remain preserved for review.
+No canonical keeper ID can also be a retirement candidate for another original.
+
 Before live publication, inspect the actual `orientation-judged.csv` and
 `design-picks.md` grammar and authoritative copies. Bind selections and
 do-not-publish references through duplicate aliases to canonical originals
@@ -96,6 +104,22 @@ and WebPs. Current byte-preservation checks do not prove that those references
 still resolve after deduplication; missing or ambiguous references remain an
 acceptance blocker. The historical selection count is evidence to reconcile,
 not a universal parser rule. Do not run `apply` on an unreviewed curation plan.
+
+New private plans retain `alias_bindings`: original and accepted-WebP aliases
+join through original SHA256 values and canonical entry keys. Drive aliases
+retain their pre-rename path and object ID, including aliases later moved to
+quarantine. Superseded different-byte outputs and unknown scratch files are
+not labeled accepted aliases. Generated derivatives remain recipe-bound until
+their prepared and verified journal records establish the output hash.
+
+The private `verified` receipt includes the binding-map digest alongside the
+canonical IDs, paths and hashes. That keeps a non-keeper selection or
+restriction reference traceable after retirement without changing the sidecar
+bytes. A bare filename or stem returns every matching original, including
+nested names; it never silently prefers the root-level file. This is lineage
+evidence, not a parser or enforcement of the actual selection/restriction
+syntax. Older manifests remain resumable but do not acquire missing alias
+evidence retroactively.
 
 Publication is serial and mount-guarded. Write bytes into journal-owned UUID
 staging names through the mount, verify their exact Drive IDs and hashes after
