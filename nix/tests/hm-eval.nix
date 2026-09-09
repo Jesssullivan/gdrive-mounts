@@ -1181,7 +1181,7 @@ if failures != [ ] then
 else
   pkgs.runCommand "gdrive-mounts-hm-eval" { } ''
     set -Eeu
-    trap 'rc=$?; printf "hm-eval: line %s failed: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; exit "$rc"' ERR
+    trap 'rc=$?; if [[ $- == *e* ]]; then printf "hm-eval: line %s failed: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; fi' ERR
 
     # Every negative assertion in this builder goes through `no`, because the
     # obvious spelling does not work: bash exempts a pipeline whose exit status
