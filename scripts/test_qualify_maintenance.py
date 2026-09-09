@@ -199,6 +199,21 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaises(q.QualificationError):
             q.owned_descendants(processes, 50)
 
+    def test_census_timeout_becomes_structured_qualification_failure(self):
+        with patch.object(q.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", q.COMMAND_TIMEOUT)):
+            with self.assertRaisesRegex(q.QualificationError, "descendant custody unavailable"):
+                q.native_process_snapshot()
+
+    def test_watchdog_abandonment_lease_refuses_unknown_label_or_expired_deadline(self):
+        mount = q.PREFIX + "mount." + "a" * 32
+        watchdog = q.PREFIX + "watchdog." + "b" * 32
+        for label, expiry in (("real-watchdog", time.monotonic() + 10),
+                              (watchdog, time.monotonic() - 1),
+                              (watchdog, time.monotonic() + q.LEASE_SECONDS + 10)):
+            with self.subTest(label=label, expiry=expiry), self.assertRaises(q.QualificationError):
+                q.watchdog_fixture_script(Path("/unused"), 42, mount, "/bin/bash", "/bin", "", "",
+                                          watchdog_label=label, lease_expires=expiry)
+
     def test_cleanup_tracks_pid_first_seen_while_waiting_for_unload(self):
         fixture = SimulatedFixture()
         fixture.touched = True

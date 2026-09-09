@@ -468,8 +468,11 @@ def owned_descendants(processes, root_pid):
 
 
 def native_process_snapshot():
-    result = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart=,comm="],
-                            capture_output=True, text=True, timeout=COMMAND_TIMEOUT, check=False)
+    try:
+        result = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart=,comm="],
+                                capture_output=True, text=True, timeout=COMMAND_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise QualificationError("native process snapshot timed out; descendant custody unavailable") from exc
     require(result.returncode == 0 and len(result.stdout) <= 2 * 1024 * 1024,
             "native process snapshot unavailable or exceeds bound")
     processes = {}
@@ -482,10 +485,17 @@ def native_process_snapshot():
     return processes
 
 
-def watchdog_fixture_script(directory, mount_pid, mount_label, interpreter, runtime_path, capture, handler):
+def watchdog_fixture_script(directory, mount_pid, mount_label, interpreter, runtime_path, capture, handler,
+                            watchdog_label=None, lease_expires=None):
     require(type(mount_pid) is int and mount_pid > 1, "invalid owned mount fixture PID")
     require(re.fullmatch(re.escape(PREFIX) + r"mount\.[a-f0-9]{32}", mount_label) is not None,
             "restart target must be the random owned mount fixture")
+    require(isinstance(watchdog_label, str) and
+            re.fullmatch(re.escape(PREFIX) + r"watchdog\.[a-f0-9]{32}", watchdog_label) is not None,
+            "expiry cleanup target must be the random owned watchdog fixture")
+    require(type(lease_expires) in (int, float) and 0 < lease_expires - time.monotonic() <= LEASE_SECONDS,
+            "watchdog fixture lease is expired or exceeds its bound")
+    expiry_epoch = int(time.time() + lease_expires - time.monotonic())
     q = shlex.quote
     # The inspected capture body runs unchanged. Native nfsstat is replaced by
     # an inert shell function and the RC executable/socket point only to this
@@ -498,14 +508,19 @@ def watchdog_fixture_script(directory, mount_pid, mount_label, interpreter, runt
             f"sock={q(str(directory / 'capture.sock'))}\n"
             f"rclone_bin={q(str(directory / 'capture-client'))}\n"
             f"floor_file={q(str(directory / 'restart-floor'))}\n"
+            f"fixture_expiry={expiry_epoch}\n"
+            f"fixture_target={q('gui/' + str(os.getuid()) + '/' + watchdog_label)}\n"
+            "gdm_fixture_active() { [ \"$(date +%s)\" -lt \"$fixture_expiry\" ]; }\n"
+            "if ! gdm_fixture_active; then exec /bin/launchctl bootout \"$fixture_target\"; fi\n"
             "gdm_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }\n"
             "gdm_epoch() { date +%s; }\ngdm_pid_uptime() { printf 0; }\n"
             "gdm_floor_blocks() { return 1; }\ngdm_record() { :; }\n"
             "gdm_log() { :; }\nnfsstat() { :; }\n" + capture + handler +
             f"\ngdm_handle_wedge\nprintf '%s\\n' restart-intent > {q(str(directory / 'restart-intent'))}\n"
-            # Keep this unconditional job alive after the positive control so
-            # an ordinary exit cannot produce a second uncontrolled capture.
-            "while :; do sleep 1; done\n")
+            # Preserve the unconditional KeepAlive shape, but bound abandoned
+            # fixtures by unloading this exact random label at static expiry.
+            "while gdm_fixture_active; do sleep 1; done\n"
+            "exec /bin/launchctl bootout \"$fixture_target\"\n")
 
 
 def qualify_watchdog_handover(parent, legacy_path):
@@ -567,7 +582,10 @@ def qualify_watchdog_handover(parent, legacy_path):
 
         def start_capture(pid, mode):
             (directory / "capture-mode").write_text(mode)
-            (directory / "watchdog.sh").write_text(watchdog_fixture_script(directory, pid, mount.label, interpreter, runtime_path, capture, handler))
+            (directory / "watchdog.sh").write_text(watchdog_fixture_script(
+                directory, pid, mount.label, interpreter, runtime_path, capture, handler,
+                watchdog_label=watchdog.label,
+                lease_expires=json.loads((directory / "lease.json").read_text())["expires"]))
             (directory / "watchdog.sh").chmod(0o700)
             watchdog.touched = True
             watchdog.launchctl("bootstrap", watchdog.domain, str(directory / "job.plist"))
