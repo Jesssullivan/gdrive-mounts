@@ -140,6 +140,15 @@ class QualificationTests(unittest.TestCase):
                 fixture.cleanup()
         remove.assert_not_called()
 
+    def test_uncertain_descendant_census_still_unloads_but_preserves_files(self):
+        fixture = SimulatedFixture()
+        fixture.qualify()
+        with patch.object(q, "pid_alive", return_value=False), patch.object(q, "remove_fixture_files") as remove:
+            fixture.cleanup(preserve_files=True)
+        self.assertFalse(fixture.loaded)
+        self.assertIn(("bootout", fixture.target), fixture.calls)
+        remove.assert_not_called()
+
     def test_cleanup_checks_observed_pid_without_heartbeat_or_start_event(self):
         for observed_before_cleanup in (False, True):
             with self.subTest(observed_before_cleanup=observed_before_cleanup):
@@ -159,6 +168,36 @@ class QualificationTests(unittest.TestCase):
                 self.assertIn(70454, fixture.known_pids)
                 alive.assert_called_with(70454)
                 remove.assert_not_called()
+
+    def test_capture_child_and_timeout_parent_must_drain_before_cleanup(self):
+        fixture = SimulatedFixture()
+        fixture.touched = True
+        fixture.records = [{"event": "capture-start", "pid": 70457, "ppid": 70458, "pgid": 70458}]
+        with patch.object(q, "pid_alive", side_effect=lambda pid: pid == 70458), \
+                patch.object(q, "remove_fixture_files") as remove:
+            with self.assertRaisesRegex(q.QualificationError, "PID still exists"):
+                fixture.cleanup()
+        self.assertEqual(fixture.known_pids, {70457, 70458})
+        remove.assert_not_called()
+
+    def test_handover_refuses_uninspected_script_before_creating_fixture(self):
+        with patch.object(q.tempfile, "mkdtemp") as mkdir, patch.object(q.subprocess, "run") as run:
+            with self.assertRaises(q.QualificationError):
+                q.qualify_watchdog_handover(Path("/unused"), "/untrusted/watchdog.sh")
+        mkdir.assert_not_called()
+        run.assert_not_called()
+
+    def test_handover_cannot_address_a_real_service(self):
+        for label in ("dev.tinyland.gdrive-mounts.sulliwood-root", q.PREFIX + "mount.not-random", "bad;command"):
+            with self.subTest(label=label), self.assertRaises(q.QualificationError):
+                q.watchdog_fixture_script(Path("/unused"), 42, label, "/bin/bash", "/bin", "", "")
+
+    def test_descendant_custody_includes_timeout_separate_process_group(self):
+        processes = {42: {"ppid": 1, "pgid": 42}, 43: {"ppid": 42, "pgid": 43},
+                     44: {"ppid": 43, "pgid": 43}, 99: {"ppid": 1, "pgid": 99}}
+        self.assertEqual(set(q.owned_descendants(processes, 42)), {42, 43, 44})
+        with self.assertRaises(q.QualificationError):
+            q.owned_descendants(processes, 50)
 
     def test_cleanup_tracks_pid_first_seen_while_waiting_for_unload(self):
         fixture = SimulatedFixture()
@@ -356,6 +395,12 @@ class PrivateFileTests(unittest.TestCase):
         return directory
 
     def test_worker_runs_in_ordinary_subprocess_and_writes_real_heartbeat(self):
+        self.run_worker(42)
+
+    def test_clean_exit_worker_returns_zero_with_matching_exit_record(self):
+        self.run_worker(0)
+
+    def run_worker(self, exit_code):
         directory = self.worker_fixture()
         if q.platform.system() == "Darwin":
             # Exercise the exact public child argv on its supported platform.
@@ -372,9 +417,9 @@ class PrivateFileTests(unittest.TestCase):
         environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=environment) as process:
-            (directory / "command").write_text(f"exit-42:{process.pid}")
+            (directory / "command").write_text(f"exit-{exit_code}:{process.pid}")
             stdout, stderr = process.communicate(timeout=5)
-        self.assertEqual(process.returncode, 42, stderr)
+        self.assertEqual(process.returncode, exit_code, stderr)
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")
         fixture = q.Fixture(directory, q.PREFIX + "test")
@@ -382,7 +427,7 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual([row["event"] for row in events], ["child-startup", "start", "exit"])
         self.assertTrue(all(row["pid"] == process.pid for row in events))
         self.assertTrue(fixture.heartbeat(process.pid))
-        self.assertEqual(events[-1]["code"], 42)
+        self.assertEqual(events[-1]["code"], exit_code)
         self.assertEqual((directory / "events.jsonl").stat().st_mode & 0o777, 0o600)
         self.assertEqual((directory / "heartbeat.json").stat().st_mode & 0o777, 0o600)
 

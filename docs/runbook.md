@@ -476,6 +476,23 @@ It does not stop, inspect or recover the real mount and does not prove upload
 drainage or the separate watchdog's `KeepAlive = true` behavior. A failed or
 inconclusive result blocks recovery.
 
+A native Neo 26.7 observation on 2026-09-09 reached the disabled control and
+observed a replacement PID after exit 42 despite successful `launchctl disable`.
+The fixture cleaned up; disabling a loaded job is not an accepted restart barrier.
+
+The alternative `--legacy-watchdog-script /nix/store/<inspected-watchdog-script>`
+sequence accepts only the exact reviewed installed watchdog bytes. It runs the
+original capture and restart handler against random owned worker labels, with
+inert NFS observations and a private RC stand-in. A positive control must deliver
+SIGQUIT and a native restart to the disposable worker. The handover control then
+boots out the unconditional watchdog during an observed RC child, verifies native
+PID/parent/process-group/start identities and descendant termination, and checks
+that no late signal or restart reaches the separate worker. Finally it qualifies
+exit zero without respawn beyond the throttle window and a fresh replacement
+start. It uses native default exit timeout and process-group behavior. This is a
+supervision experiment: its clean-exit marker does not prove that real rclone
+receives an NFS unmount callback, completes uploads, or exits successfully.
+
 The fixture removes only its own known files and unloads its random service.
 An uncertain cleanup preserves the exact directory and reports it. Clearing its
 disabled override can leave an enabled label record in launchd's persistent
