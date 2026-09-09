@@ -30,7 +30,7 @@ test-lib:
 test-photos:
     bash scripts/test-photos.sh
 
-# Synthetic launchd qualification controller tests; no services or live probes.
+# Simulated launchd controllers and a worker child; no services or live probes.
 test-maintenance:
     bash scripts/test-maintenance.sh
 

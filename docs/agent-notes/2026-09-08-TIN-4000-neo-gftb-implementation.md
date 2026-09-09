@@ -628,3 +628,58 @@ Switch readiness remains unestablished: disposable qualification, complete
 upload reconciliation, exact closure/runtime and activation-side-effect review
 are outstanding. No real GFTB inventory or retirement occurred; the authoritative
 absolute path and deduplication completion remain live acceptance deliverables.
+
+## Active goal and activation preparation — 2026-09-09 UTC
+
+The operator requested an explicit goal and approved the narrowly scoped TCFS
+activation-safety change. The active goal uses three hours as a scope guide,
+not a deadline: reviewed source merges, exact minimal Neo delivery, qualified
+non-forcing recovery, and the whole GFTB collection as the on-machine proof.
+Distinct originals, accepted WebPs and unchanged curation remain required;
+retirement still needs approval of its exact manifest. No interim message goes
+to the parallel lab agent; it receives only verified SWITCH READY evidence.
+
+Gdrive PR #20 merged as verified signed `45b227d5adc8ff367e45495663d2a80faafe018d`.
+Lab PR #1691's fresh read still showed open, non-draft, with auto-merge armed
+at signed `8bd3ebd45b30cd3ce1edc0e05c9c88ddde4f85d7`. It is not a merge receipt.
+The next governed mount input must include the merged index-lock fix; candidate
+478's older `82a4234` input does not. Publication needs an admitted exact draft
+head and protected-main registry provenance, not a hand-edited cache URL.
+
+A draft TCFS-only option defers TCFS-specific activation hooks while allowing
+the gdrive update. Independent review required its equality guard to precede
+stale-agent cleanup and materialized-file preparation, and to reject installed-only
+TCFS plists. It is not a shared-SOPS freeze or TCFS service quiescence. Delivery
+must backport the narrow change onto the active-source-based candidate and prove
+unchanged non-gdrive lock fields, TCFS/FileProvider inputs and secret contracts.
+The shared primary lab checkout and existing candidate478 were not modified.
+
+The disposable qualifier now retains structured, allowlisted failure evidence
+before cleanup, without raw launchd environments or exception text. An ordinary
+child-process test proved actual startup, heartbeat and requested exit 42; that
+does not certify launchd. One deliberate revised launchd experiment used source
+SHA256 `7d2832c655372b849ee0cc1ba99d666b862829abde61cb61a87d80a3903c504b` and
+random label suffix `79e879eb6b1f442daf2dc51593d63398`, with the same Python 3.14.7
+interpreter and macOS 26.7/Darwin 25.6.0. It started and observed exit 42, then
+failed the enabled-restart positive control: launchd reported runs 2 and a
+running replacement PID 70454, but no replacement startup event or fresh
+heartbeat was observed within the bound. This does not prove restart suppression
+under disable; the experiment never reached that phase.
+
+Cleanup verified fixture unload, cleared the disabled override and removed its
+private files. A separate exact-PID check found 70454 absent; the empty scratch
+parent was removed with `rmdir`. Review of that result also required cleanup to
+track observed PIDs even without heartbeats. No real mount or watchdog was
+targeted, no cache was removed, and no live photo inventory or mutation occurred.
+The latest admission snapshot returned warning pressure 2, 7121.25 MiB used swap
+and 174 MiB unused RAM. Builds and live photo work stayed paused. Neither SWITCH
+READY nor GFTB COMPLETE is established.
+
+Final diagnostics source passed the complete `just check`: 40 shell assertions,
+153 photo tests (151 passed, two ambient-codec skips), 29 maintenance tests,
+schema/render, secrets, endpoint doctrine, manifest, Home Manager drvPath
+evaluation and workflow checks. The new cleanup regressions require absence of
+every observed fixture PID, including one first seen during cleanup or without
+a heartbeat, before removing private files. This final source was not subjected
+to another launchd experiment. Full native-codec and live-data acceptance remain
+separate from these source gates.

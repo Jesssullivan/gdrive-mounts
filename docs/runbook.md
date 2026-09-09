@@ -435,6 +435,12 @@ parent must be user-owned, mode 0700, inside the authorized workspace and outsid
 `/tmp`. The command tests enabled restart as a positive control, whether disabling
 preserves a live process, suppression of restart after failure, and re-enabling.
 Its receipt records the OS, source hash and exact tested supervision settings.
+Startup failure evidence is retained before cleanup: allowlisted launchd state,
+worker-event counts and heartbeat presence, plus structured worker errors when
+available. Raw launchd output, environment values and tracebacks are not exposed.
+Missing worker events do not prove that launchd never executed the interpreter;
+the worker may have failed before it could record an event. A startup timeout
+does not establish whether disabling suppresses restart.
 It does not stop, inspect or recover the real mount and does not prove upload
 drainage or the separate watchdog's `KeepAlive = true` behavior. A failed or
 inconclusive result blocks recovery.
@@ -443,7 +449,9 @@ The fixture removes only its own known files and unloads its random service.
 An uncertain cleanup preserves the exact directory and reports it. Clearing its
 disabled override can leave an enabled label record in launchd's persistent
 database; the tool never edits that database. `just test-maintenance` exercises
-the controller with simulated services and time, without changing launchd.
+the controller with simulated services and time and the worker as a short-lived
+ordinary child process. It never changes launchd. These tests do not substitute
+for the attended disposable-service qualification.
 
 ### Mutating entrypoints
 
