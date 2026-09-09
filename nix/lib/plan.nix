@@ -398,11 +398,28 @@ let
       printf 'FATAL gdrive-mounts %s: mount table unavailable; startup held\n' "$unit" >&2
       exit 75
     fi
-    if printf '%s\n' "$gdm_mount_table" | grep -qF " on $point ("; then
+    gdm_root_seen=0
+    gdm_target_seen=0
+    while IFS= read -r gdm_mount_line; do
+      case "$gdm_mount_line" in
+        *" on "*" ("*")") ;;
+        *)
+          printf 'FATAL gdrive-mounts %s: malformed mount table; startup held\n' "$unit" >&2
+          exit 75
+          ;;
+      esac
+      case "$gdm_mount_line" in *" on / ("*")") gdm_root_seen=1 ;; esac
+      case "$gdm_mount_line" in *" on $point ("*")") gdm_target_seen=1 ;; esac
+    done <<< "$gdm_mount_table"
+    if [ "$gdm_root_seen" != 1 ]; then
+      printf 'FATAL gdrive-mounts %s: root mount unavailable; startup held\n' "$unit" >&2
+      exit 75
+    fi
+    if [ "$gdm_target_seen" = 1 ]; then
       printf 'FATAL gdrive-mounts %s: existing mount preserved; reviewed non-forcing recovery required\n' "$unit" >&2
       exit 75
     fi
-    unset gdm_mount_table
+    unset gdm_mount_table gdm_mount_line gdm_root_seen gdm_target_seen
     # END Darwin existing mount admission
   '';
 

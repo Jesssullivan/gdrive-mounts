@@ -1697,8 +1697,28 @@ else
     s10="$w/s10"
     mkdir -p "$s10"
     touch "$s10/mounted" "$s10/active"
-    sleep 60 &
+    # Bash async children inherit SIGQUIT ignored. Reset it explicitly, and
+    # prove the discriminator with a separate owned positive-control child.
+    env --default-signal=QUIT bash -c 'ulimit -c 0; printf ready > "$1"; exec sleep 60' _ "$s10/positive-ready" &
+    positive_pid=$!
+    for tick in $(seq 1 100); do
+      [ -s "$s10/positive-ready" ] && break
+      sleep 0.05
+    done
+    [ -s "$s10/positive-ready" ]
+    kill -QUIT "$positive_pid"
+    set +e
+    wait "$positive_pid"
+    positive_rc=$?
+    set -e
+    [ "$positive_rc" = 131 ]
+    env --default-signal=QUIT bash -c 'ulimit -c 0; printf ready > "$1"; exec sleep 60' _ "$s10/held-ready" &
     held_pid=$!
+    for tick in $(seq 1 100); do
+      [ -s "$s10/held-ready" ] && break
+      sleep 0.05
+    done
+    [ -s "$s10/held-ready" ]
     printf '%s\n' "$held_pid" > "$s10/pid"
     "$wdhold" "$s10/absent" "$s10" 5 > "$s10/out"
     kill -0 "$held_pid"
@@ -1717,7 +1737,7 @@ else
     mkdir -p "$s11/bin"
     cat > "$s11/bin/mount" <<'EOF'
     #!/bin/sh
-    printf 'fixture:/ on /home/tester/GDrive/sulliwood (nfs)\n'
+    printf 'fixture-root:/ on / (apfs)\nfixture:/ on /home/tester/GDrive/sulliwood (nfs)\n'
     EOF
     cat > "$s11/bin/umount" <<EOF
     #!/bin/sh
@@ -1744,7 +1764,7 @@ else
     # startup admission after externally established detach, not a detach test.
     cat > "$s11/bin/mount" <<'EOF'
     #!/bin/sh
-    exit 0
+    printf 'fixture-root:/ on / (apfs)\n'
     EOF
     PATH="$s11/bin:$PATH" bash "$s11/guard.sh"
     [ -f "$s11/continued" ]
@@ -1764,6 +1784,33 @@ else
     [ "$startup_rc" = 75 ]
     [ ! -e "$s11/continued" ]
     grep -q 'mount table unavailable' "$s11/error"
+
+    # Early matches in a table exceeding a pipe buffer remain occupied, and
+    # empty/malformed successful command output never becomes absence proof.
+    cat > "$s11/bin/mount" <<'EOF'
+    #!/bin/sh
+    printf 'fixture-root:/ on / (apfs)\nfixture:/ on /home/tester/GDrive/sulliwood (nfs)\n'
+    for item in $(seq 1 4096); do
+      printf 'fixture:/ on /Volumes/fixture-%s (apfs, local)\n' "$item"
+    done
+    EOF
+    set +e
+    PATH="$s11/bin:$PATH" bash "$s11/guard.sh" 2> "$s11/error"
+    startup_rc=$?
+    set -e
+    [ "$startup_rc" = 75 ]
+    [ ! -e "$s11/continued" ]
+    grep -q 'existing mount preserved' "$s11/error"
+    for invalid_table in "" 'unparseable' 'fixture:/ on /Volumes/other (apfs)'; do
+      printf '%s\n' "$invalid_table" > "$s11/table"
+      printf '#!/bin/sh\ncat %s/table\n' "$s11" > "$s11/bin/mount"
+      set +e
+      PATH="$s11/bin:$PATH" bash "$s11/guard.sh" 2> "$s11/error"
+      startup_rc=$?
+      set -e
+      [ "$startup_rc" = 75 ]
+      [ ! -e "$s11/continued" ]
+    done
 
     # ── layer 3c: the concatenated activation must hand back the PATH it got ──
     #
