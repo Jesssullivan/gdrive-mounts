@@ -246,6 +246,26 @@ class Fixture:
         except (ValueError, OSError) as exc:
             raise QualificationError("fixture event log unavailable") from exc
 
+    def diagnostic_identity(self, expected=None):
+        """Bind a diagnostic to this launched random label and stable PID/start."""
+        require(self.touched and re.fullmatch(re.escape(PREFIX) + r"(?:(?:mount|watchdog)\.)?[a-f0-9]{32}",
+                                             self.label) is not None,
+                "diagnostic target is not a launched random fixture")
+        require(self.target == f"gui/{os.getuid()}/{self.label}", "diagnostic target changed")
+        current = self.observed_state()
+        pid = current.get("pid") if current else None
+        require(type(pid) is int and pid > 1, "diagnostic label has no live PID")
+        require(expected is None or pid == expected["pid"], "diagnostic label changed process")
+        process = native_process_snapshot().get(pid)
+        require(process is not None and bool(process.get("started")), "diagnostic process identity unavailable")
+        # comm, PPID and PGID may legitimately change across shell -> Python
+        # exec. They are observations, not the identity of the process lifetime.
+        identity = {"pid": pid, "started": process["started"]}
+        current = self.observed_state()
+        require(current is not None and current.get("pid") == pid, "diagnostic label changed during census")
+        require(expected is None or identity == expected, "diagnostic process lifetime changed")
+        return identity
+
     def startup_diagnostics(self):
         """Allowlisted evidence only, using the state already sampled by probes."""
         result = {"phase": self.phase, "last_observed_state": self.last_observed_state,
@@ -298,37 +318,42 @@ class Fixture:
             except (QualificationError, OSError, ValueError, KeyError, TypeError, AttributeError):
                 result[name] = "unavailable"
         if self.touched and platform.system() == "Darwin":
+            diagnostic = "native_sample"
             try:
-                current = self.observed_state()
-                pid = current.get("pid") if current else None
-                if pid:
-                    process = native_process_snapshot().get(pid)
-                    require(process is not None, "startup process disappeared before attribution")
-                    result["live_process"] = {"pid": pid, **process}
-                    # Only this still-live owned fixture is sampled. No grants,
-                    # elevated attach, raw environment or production PID fallback.
-                    sample = subprocess.run(["/usr/bin/sample", str(pid), "1", "10", "-mayDie",
-                                             "-file", str(self.directory / "startup.sample")],
-                                            capture_output=True, timeout=5, check=False)
-                    info = {"exit": sample.returncode}
-                    path = self.directory / "startup.sample"
-                    if path.exists():
-                        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                        with os.fdopen(fd, "rb") as stream:
-                            require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "sample is not regular")
-                            raw = stream.read(256 * 1024 + 1)
-                        info.update({"bytes_observed": len(raw), "truncated": len(raw) > 256 * 1024,
-                                     "sha256": hashlib.sha256(raw).hexdigest(),
-                                     "frames": [line.strip() for line in raw.decode(errors="replace").splitlines()
-                                                if re.match(r"^\s*\+*\s*\d+\s+\S", line)][:128]})
-                    result["native_sample"] = info
-                    after = native_process_snapshot().get(pid)
-                    result["same_process_after_sample"] = after == process
-                    cwd = subprocess.run(["/usr/sbin/lsof", "-nP", "-b", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-                                         capture_output=True, text=True, timeout=5, check=False)
-                    result["cwd"] = [line[1:] for line in cwd.stdout.splitlines() if line.startswith("n")][:1]
-                    result["cwd_probe_exit"] = cwd.returncode
+                identity = self.diagnostic_identity()
+                pid = identity["pid"]
+                result["live_process"] = identity
+                # Revalidate the exact label and lifetime around each native
+                # diagnostic. Never follow a replacement PID or publish evidence
+                # from a probe whose process custody was lost.
+                sample = subprocess.run(["/usr/bin/sample", str(pid), "1", "10", "-mayDie",
+                                         "-file", str(self.directory / "startup.sample")],
+                                        capture_output=True, timeout=5, check=False)
+                self.diagnostic_identity(identity)
+                info = {"exit": sample.returncode, "identity_verified": True}
+                path = self.directory / "startup.sample"
+                if path.exists():
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(fd, "rb") as stream:
+                        require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "sample is not regular")
+                        raw = stream.read(256 * 1024 + 1)
+                    info.update({"bytes_observed": len(raw), "truncated": len(raw) > 256 * 1024,
+                                 "sha256": hashlib.sha256(raw).hexdigest(),
+                                 "frames": [line.strip() for line in raw.decode(errors="replace").splitlines()
+                                            if re.match(r"^\s*\+*\s*\d+\s+\S", line)][:128]})
+                result["native_sample"] = info
+                diagnostic = "cwd"
+                self.diagnostic_identity(identity)
+                cwd = subprocess.run(["/usr/sbin/lsof", "-nP", "-b", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                                     capture_output=True, text=True, timeout=5, check=False)
+                self.diagnostic_identity(identity)
+                result["cwd"] = [line[1:] for line in cwd.stdout.splitlines() if line.startswith("n")][:1]
+                result["cwd_probe_exit"] = cwd.returncode
+                result["cwd_identity_verified"] = True
             except (QualificationError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                result[diagnostic] = {"available": False, "reason": "identity or diagnostic unavailable"}
+                if diagnostic == "native_sample":
+                    result["cwd"] = {"available": False, "reason": "sample custody unproved; probe skipped"}
                 result["live_attribution"] = "unavailable: " + type(exc).__name__
         return result
 

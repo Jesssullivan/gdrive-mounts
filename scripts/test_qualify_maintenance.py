@@ -419,6 +419,99 @@ class PrivateFileTests(unittest.TestCase):
         (directory / "lease.json").write_text(json.dumps({"expires": time.monotonic() + 20}))
         return directory
 
+    def diagnostic_fixture(self, snapshots, label_pids=None):
+        fixture = q.Fixture(self.worker_fixture(), q.PREFIX + "mount." + "a" * 32)
+        fixture.touched = True
+        label_pids = label_pids or [700123] * 8
+        outputs = [f"pid = {pid}\n" if pid is not None else "state = exited\n" for pid in label_pids]
+        fixture.launchctl = Mock(side_effect=outputs)
+        calls = []
+
+        def probe(command, **_kwargs):
+            calls.append(command)
+            if command[0] == "/usr/bin/sample":
+                (fixture.directory / "startup.sample").write_text("  + 1 owned_sample_frame\n")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            self.assertEqual(command[0], "/usr/sbin/lsof")
+            return subprocess.CompletedProcess(command, 0, "p700123\nn/owned-fixture-cwd\n", "")
+
+        with patch.object(q.platform, "system", return_value="Darwin"), \
+                patch.object(q, "native_process_snapshot", side_effect=snapshots), \
+                patch.object(q.subprocess, "run", side_effect=probe):
+            evidence = fixture.startup_diagnostics()
+        self.assertTrue(all(call.args == ("print", fixture.target) and call.kwargs == {"missing_ok": True}
+                            for call in fixture.launchctl.call_args_list))
+        return evidence, calls
+
+    def process_snapshot(self, started="Wed Sep 9 17:00:00 2026", command="sh"):
+        return {700123: {"ppid": 1, "pgid": 700123, "started": started, "command": command}}
+
+    def test_diagnostic_identity_accepts_exec_without_changing_process_lifetime(self):
+        evidence, calls = self.diagnostic_fixture([self.process_snapshot(),
+            *[self.process_snapshot(command="python3.12")] * 3])
+        self.assertEqual([call[0] for call in calls], ["/usr/bin/sample", "/usr/sbin/lsof"])
+        self.assertEqual(evidence["native_sample"]["frames"], ["+ 1 owned_sample_frame"])
+        self.assertTrue(evidence["native_sample"]["identity_verified"])
+        self.assertEqual(evidence["cwd"], ["/owned-fixture-cwd"])
+        self.assertTrue(evidence["cwd_identity_verified"])
+        self.assertNotIn("live_attribution", evidence)
+        self.assertEqual(set(evidence["live_process"]), {"pid", "started"})
+
+    def test_sample_lost_identity_discards_frames_and_never_probes_cwd(self):
+        cases = (
+            ([self.process_snapshot(), self.process_snapshot(started="Wed Sep 9 17:00:01 2026")], None),
+            ([self.process_snapshot(), {}], None),
+            ([self.process_snapshot()], [700123, 700123, 700124]),
+            ([self.process_snapshot(), self.process_snapshot()], [700123, 700123, 700123, 700124]),
+            ([self.process_snapshot(), q.QualificationError("census unavailable")], None),
+        )
+        for snapshots, label_pids in cases:
+            with self.subTest(snapshots=snapshots, label_pids=label_pids):
+                evidence, calls = self.diagnostic_fixture(snapshots, label_pids)
+                self.assertEqual([call[0] for call in calls], ["/usr/bin/sample"])
+                self.assertFalse(evidence["native_sample"]["available"])
+                self.assertFalse(evidence["cwd"]["available"])
+                self.assertNotIn("owned_sample_frame", json.dumps(evidence))
+                self.assertNotIn("cwd_probe_exit", evidence)
+
+    def test_identity_change_before_cwd_skips_numeric_pid_probe(self):
+        evidence, calls = self.diagnostic_fixture([self.process_snapshot()] * 3,
+                                                  [700123] * 4 + [700124, 700124])
+        self.assertEqual([call[0] for call in calls], ["/usr/bin/sample"])
+        self.assertTrue(evidence["native_sample"]["identity_verified"])
+        self.assertFalse(evidence["cwd"]["available"])
+        self.assertNotIn("cwd_probe_exit", evidence)
+
+    def test_identity_change_during_cwd_discards_its_output(self):
+        for snapshots, label_pids in (
+            ([self.process_snapshot()] * 3 + [self.process_snapshot(started="Wed Sep 9 17:00:01 2026")], None),
+            ([self.process_snapshot()] * 4, [700123] * 7 + [700124]),
+        ):
+            with self.subTest(label_pids=label_pids):
+                evidence, calls = self.diagnostic_fixture(snapshots, label_pids)
+                self.assertEqual([call[0] for call in calls], ["/usr/bin/sample", "/usr/sbin/lsof"])
+                self.assertTrue(evidence["native_sample"]["identity_verified"])
+                self.assertFalse(evidence["cwd"]["available"])
+                self.assertNotIn("/owned-fixture-cwd", json.dumps(evidence))
+                self.assertNotIn("cwd_probe_exit", evidence)
+                self.assertNotIn("cwd_identity_verified", evidence)
+
+    def test_unowned_diagnostic_target_refuses_before_native_observation(self):
+        for label, touched, changed_target in ((q.PREFIX + "test", True, False),
+                ("dev.tinyland.gdrive-mounts.sulliwood-root", True, False),
+                (q.PREFIX + "a" * 32, False, False), (q.PREFIX + "a" * 32, True, True)):
+            with self.subTest(label=label, touched=touched, changed_target=changed_target):
+                fixture = q.Fixture(self.worker_fixture(), label)
+                fixture.touched = touched
+                if changed_target:
+                    fixture.target = "gui/501/dev.tinyland.gdrive-mounts.sulliwood-root"
+                fixture.launchctl = Mock()
+                with patch.object(q, "native_process_snapshot") as snapshot:
+                    with self.assertRaises(q.QualificationError):
+                        fixture.diagnostic_identity()
+                fixture.launchctl.assert_not_called()
+                snapshot.assert_not_called()
+
     def test_worker_runs_in_ordinary_subprocess_and_writes_real_heartbeat(self):
         self.run_worker(42)
 
