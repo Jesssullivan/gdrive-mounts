@@ -32,39 +32,22 @@ staged `*token*.json`; gmailctl precedent),
 encrypted in place — whole-document JSON, not a YAML leaf per field (the
 gmailctl precedent).
 
-`.sops.yaml` needs a creation rule matching this tree before `just seed-lab`
-can encrypt into it — the existing catch-all only matches `.yaml$`:
+`lab:.sops.yaml` owns the creation rule and actual age-recipient set. Inspect
+that reviewed rule and the encrypted leaves' recipient metadata before
+enrolling a host. Do not copy a historical two-host recipient example: the
+estate has changed, and several host aliases can refer to the same key.
+Cryptographic ability to decrypt does **not** enable a mount.
 
-```yaml
-- path_regex: nix/secrets/gdrive-mounts/.*\.json$
-  key_groups:
-    - age:
-        - *jsullivan2_macbook_neo   # the two mount clients only
-        - *jess_sting
-```
+`lab:nix/secrets/default.nix` applies two gates to each secret declaration:
 
-(`lab` branch `feat/gdrive-mounts-wrapper` carries this rule; `just seed-lab`
-prints the stanza when it is missing.)
+1. This host enables both `tinyland.gdriveMounts.enable` and the org's
+   `tinyland.gdriveMounts.orgs.<org>.enable`.
+2. The corresponding encrypted file exists.
 
-Declared in `lab:nix/secrets/default.nix`, presence-gated so an unseeded org
-degrades instead of blocking activation:
-
-```nix
-sops.secrets."gdrive-mounts/<org>/client" = lib.optionalAttrs
-  (builtins.pathExists ./gdrive-mounts/<org>/client.json) {
-    sopsFile = ./gdrive-mounts/<org>/client.json;
-    format = "json";
-    key = "";
-    path = "${config.xdg.stateHome}/gdrive-mounts/secrets/<org>/client.json";
-  };
-sops.secrets."gdrive-mounts/<org>/token" = lib.optionalAttrs
-  (builtins.pathExists ./gdrive-mounts/<org>/refresh.json) {
-    sopsFile = ./gdrive-mounts/<org>/refresh.json;
-    format = "json";
-    key = "";
-    path = "${config.xdg.stateHome}/gdrive-mounts/secrets/<org>/token.json";
-  };
-```
+Both files must be declared before the lab wrapper wires an enabled org;
+an incomplete pair is an evaluation failure. Presence alone must never
+declare these secrets on unrelated hosts. The upstream module's warning for
+missing paths is not a substitute for this consumer assertion.
 
 The lab wrapper module passes the resolved paths into this repo's
 home-manager module:
@@ -76,8 +59,14 @@ programs.gdrive-mounts.secrets.<org> = {
 };
 ```
 
-`just seed-lab <org>` prints this exact snippet with `<org>` filled in —
-copy it, don't retype it.
+The runtime paths remain `<stateDir>/secrets/<org>/{client,token}.json`.
+Verify their resolved target permissions without printing their contents;
+sops paths can be symlinks, so checking the symlink's mode is incorrect.
+
+For deployment, use the attended direct local workflow in
+[`adoption.md`](adoption.md#5-direct-local-home-manager-delivery-attended).
+Verify source, generation, rendered scope, actual mount and a bounded
+remote read separately. A pin update does not require re-minting credentials.
 
 ## Scope and promotion
 

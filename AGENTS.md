@@ -16,7 +16,42 @@ target — see `docs/position.md`.
    operator-in-browser act.
 4. sting is client-only. Nothing durable runs there.
 5. Signed commits, PR flow. No direct push to `main` past the initial
-   scaffold commit.
+   scaffold commit. Keep this repository private and protect exact
+   `refs/heads/main` with required PRs and verified signatures, no deletion
+   or force-push, and no bypass actors (operator ratification: 2026-09-08).
+6. Photo consolidation keeps each distinct original and one accepted WebP
+   in Drive. Preserve existing orientation and publication restrictions.
+   Deduplicate by verified content and Drive ID, never filename alone;
+   retirement requires an explicitly approved manifest and remote verification.
+7. Photo publication writes bytes through the mount to journal-owned UUID
+   staging files, independently verifies their Drive IDs/hashes, then promotes
+   those same IDs through the Drive API. This exception was ratified 2026-09-08
+   because Apple NFS lacks exclusive rename on this backend. Preserve existing
+   objects and refuse name ambiguity; never fall back to an overwriting rename
+   or claim globally atomic filename exclusion against concurrent writers.
+8. The Neo photo tranche uses the whole-collection manifest and a portable
+   `webp/gftb-catalog.json` alongside unchanged curation documents. Recover
+   Drive-only accepted WebPs to SSD staging by exact reviewed ID/hash, never
+   by re-encoding. Preserve historical rotation notes without replaying them.
+   These choices were ratified by interview on 2026-09-08.
+9. At warning memory pressure, allow only the four named root/`webp/`
+   `orientation-judged.csv` and `design-picks.md` sidecars, each at most 64 KiB,
+   after SSD identity and non-symlink path checks. Critical pressure refuses;
+   corpus hashing, codecs, builds and mount writes require normal headroom.
+10. This lane prepares Neo closure/runtime/recovery readiness. Before any live
+    recovery, qualify supervision controls on a disposable service. One
+    attended, non-forcing attempt with writers paused and cache/config
+    preserved is permitted even if upload status remains unknown; unknown
+    buffered writes remain a risk, not evidence of drainage. Stop on failure
+    or ambiguity; no forced-unmount or signal-to-rclone fallback. The parallel
+    lab agent owns the ready direct local switch, not interim preparation.
+    Permanent restart-policy and fleet hardening follow the Neo photo proof.
+11. Operator authorization on 2026-09-08 permits source review, draft promotion
+    and governed merges independently of live-data acceptance. Do not bypass
+    required checks or the accepted local gates in `docs/position.md`, weaken
+    protection or close TIN-3883/TIN-4000 on source merge alone. The direct
+    switch still requires exact closure and
+    recovery/upload-safety proof; retirement still needs its exact manifest.
 
 ## Where each fact lives
 
@@ -42,8 +77,13 @@ here), prompt-toon (agent-output shaping conventions).
 
 ## Boundary map
 
-- `lab` — secrets (sops/age) and deploy (home-manager wrapper, attended
-  `just nix-switch macbook-neo`).
+- `lab` — secrets (sops/age) and deploy (home-manager wrapper). Neo-first
+  delivery uses an attended `just nix-switch-local 'jess@macbook-neo'`
+  from a reviewed candidate, with source and active-generation verification.
+  A configured daily switch is not evidence that delivery happened.
+  Communicate with the parallel lab agent only when switch readiness is
+  established by exact candidate/closure and upload-safety evidence. Do not
+  send interim preparation or status-relay requests (operator: 2026-09-08).
 - `finances` — session-notes home only; otherwise unrelated.
 - `tummycrypt` — the long-term successor (TCFS). See `docs/position.md`.
 
@@ -60,6 +100,8 @@ here), prompt-toon (agent-output shaping conventions).
 | CI surface (actionlint + ActionPlan) | `just workflow-validate` |
 | Secrets scan, commit history | `just secrets-scan-history` |
 | Shell library unit tests | `just test-lib` |
+| Synthetic photo safety contracts | `just test-photos` |
+| Disposable supervision controller contracts (no live service) | `just test-maintenance` |
 | Home-manager module eval | `just hm-eval` |
 | Home-manager eval proof, built | `just hm-eval-build` |
 | Bazel candidate graph | `just bazel-test` |

@@ -104,6 +104,71 @@ is "json_escape escapes a backslash" "$(json_escape 'a\b')" 'a\\b'
 # ── conf_path ───────────────────────────────────────────────────────────────
 is "conf_path" "$(conf_path /s sulliwood)" /s/rclone-sulliwood.conf
 
+# ── index lock ─────────────────────────────────────────────────────────────
+# Execute the real index entrypoint with inert exported shell functions. The
+# registry has no orgs, sqlite writes no database, and rclone must never run.
+index_entry="$(dirname "$_c")/../gdrive-index.sh"
+if [ ! -f "$index_entry" ]; then
+  index_entry="$d/gdrive-mounts-gdrive-index"
+fi
+[ -f "$index_entry" ] || die "index entrypoint unavailable for registered lock tests"
+printf '{"orgs":[]}\n' > "$t/index-registry.json"
+
+run_index_fixture() (
+  export GDM_TEST_INDEX_STATE="$1" GDM_TEST_INDEX_MODE="${2:-normal}"
+  export GDM_TEST_INDEX_CALLS="$1/calls"
+  jq() { return 0; }
+  rclone() { printf 'unexpected-rclone\n' >> "$GDM_TEST_INDEX_CALLS"; return 70; }
+  sqlite3() {
+    printf 'sqlite\n' >> "$GDM_TEST_INDEX_CALLS"
+    case "$GDM_TEST_INDEX_MODE" in
+      replace-owner)
+        mv -- "$GDM_TEST_INDEX_STATE/index.lock" "$GDM_TEST_INDEX_STATE/former-lock"
+        mkdir -- "$GDM_TEST_INDEX_STATE/index.lock"
+        printf 'other-owner\n' > "$GDM_TEST_INDEX_STATE/index.lock/owner.other"
+        ;;
+      replace-empty)
+        mv -- "$GDM_TEST_INDEX_STATE/index.lock" "$GDM_TEST_INDEX_STATE/former-lock"
+        mkdir -- "$GDM_TEST_INDEX_STATE/index.lock"
+        ;;
+    esac
+    return 0
+  }
+  export -f jq rclone sqlite3
+  rc=0
+  bash "$index_entry" --orgs "$t/index-registry.json" --conf-dir "$t" \
+    --state-dir "$GDM_TEST_INDEX_STATE" > "$GDM_TEST_INDEX_STATE/stdout" \
+    2> "$GDM_TEST_INDEX_STATE/stderr" || rc=$?
+  printf '%s' "$rc"
+)
+
+mkdir "$t/index-normal"
+is "index unoccupied lock succeeds" "$(run_index_fixture "$t/index-normal")" 0
+is "index normal exit removes its own lock" "$([ ! -e "$t/index-normal/index.lock" ] && printf yes)" yes
+is "index synthetic run never invokes rclone" "$(cat "$t/index-normal/calls")" sqlite
+
+for fixture in missing-marker stale-pid unreadable-marker live-owner; do
+  index_state="$t/index-$fixture"
+  mkdir -p "$index_state/index.lock"
+  case "$fixture" in
+    stale-pid) printf '999999999\n' > "$index_state/index.lock/pid" ;;
+    unreadable-marker) mkdir "$index_state/index.lock/pid" ;;
+    live-owner) printf '%s\n' "$$" > "$index_state/index.lock/owner.$$" ;;
+  esac
+  is "index occupied $fixture refuses" "$(run_index_fixture "$index_state")" 1
+  is "index occupied $fixture remains untouched" "$([ -d "$index_state/index.lock" ] && printf yes)" yes
+  is "index occupied $fixture never reaches sqlite or rclone" "$([ ! -e "$index_state/calls" ] && printf yes)" yes
+done
+
+for replacement in replace-owner replace-empty; do
+  index_state="$t/index-$replacement"
+  mkdir "$index_state"
+  is "index replacement fixture exits normally" "$(run_index_fixture "$index_state" "$replacement")" 0
+  is "index cleanup preserves $replacement directory" "$([ -d "$index_state/index.lock" ] && printf yes)" yes
+  is "index cleanup preserves former owner evidence" "$([ -d "$index_state/former-lock" ] && printf yes)" yes
+done
+is "index cleanup leaves another owner marker unchanged" "$(cat "$t/index-replace-owner/index.lock/owner.other")" other-owner
+
 if [ "$FAIL" != 0 ]; then
   die "$FAIL of $((PASS + FAIL)) assertion(s) failed"
 fi

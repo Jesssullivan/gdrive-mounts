@@ -11,13 +11,10 @@ into chat.
 - The cache volume is mounted (`/Volumes/TinylandSSD` on neo). Absent at
   mount time is a runbook failure mode, not an adoption blocker — see
   `docs/runbook.md`.
-- `nix develop` works in this repo (`.envrc` wires direnv). On neo the
-  machine policy is remote-first (`max-jobs = 0`, one x86_64-linux builder,
-  no darwin builder), so realizing the darwin devShell needs a deliberate
-  local-build override once per shell:
-  `nix develop --option builders '' --option max-jobs auto`
-  (or `NIX_CONFIG=$'builders =\nmax-jobs = auto'`). Every `nix eval` on
-  neo takes 1–3 minutes; that is the machine, not the repo.
+- The required tools are available from the pinned devShell. Neo is an
+  8 GiB, remote-first host: do not use an unbounded local-build override
+  to obtain them. Realize missing dependencies on an approved builder;
+  respect lab's resource and storage preflight before an attended activation.
 - The org exists in `orgs.json` with `enabled: true`. Adding a new org later
   is a data change only — see "Per-org growth" below.
 
@@ -63,9 +60,25 @@ registration in `nix/home-manager/default.nix`, a host enable, and an eval
 test fixture. This repo does not restate the wrapper's internal shape — it
 is `lab`'s to own.
 
-## 5. `just nix-switch macbook-neo` (operator, attended)
+## 5. Direct local Home Manager delivery (attended)
 
-The only switch path. Never run by an agent.
+For the Neo-first reliability candidate, run from the reviewed **lab** tree:
+
+```sh
+NIX_SWITCH_LOCAL_BUILD_REASON="TIN-3883 Neo Sulliwood stability candidate" \
+  just nix-switch-local 'jess@macbook-neo'
+```
+
+This is an attended operator-authorized action, not background enrollment.
+Follow lab's `docs/operations/LOCAL_CONSOLIDATION_DELIVERY.md`: record the
+source revision and dirty state, compare the candidate with the deployed
+source, and verify the active generation/closure after activation. Stop on
+unrelated changes, unsafe memory/storage pressure, or unknown provenance.
+The normal main-source `just nix-switch` lane still exists, but a configured
+daily switch is neither a dependency nor proof of delivery.
+
+Changing a mount pin is not a new OAuth ceremony. If the current Sulliwood
+credentials already carry the ratified scope, preserve them.
 
 ## 6. `just doctor` / `just smoke <org>`
 
@@ -83,6 +96,29 @@ including "GFTB Stuff". A failing section: `docs/runbook.md`.
 | 4 — lab PR merged, not switched | same as step 3 | missing | absent | absent |
 | 5 — switched | resolved via sops paths | rendered, `0600` | running | absent until first index run |
 | 6 — `just index` or timer fires | — | — | running | fresh, within SLO |
+
+## Existing-host rollout, not new enrollment
+
+Source snapshot, 2026-09-08; this table is **not** a live deployment receipt:
+
+| Host | Declared mount posture | Admission before a direct local switch |
+|---|---|---|
+| neo | Sulliwood enabled; external cache, 20G, low-memory profile | Exact SSD identity, memory pressure, queued uploads, minimal candidate versus active source |
+| PZM | Sulliwood enabled; external cache, 40G | Fresh external-volume identity/capacity and host storage gates; do not reuse old receipts |
+| Yoga | Sulliwood enabled; user cache, 5G, FUSE | Fresh disk headroom, `/dev/fuse`, `fusermount3`, delivered secret pair |
+| mbp-13 | Mount disabled; secret delivery disabled | Remains disabled pending reviewed enrollment; a shared age-key alias is not host enablement |
+| sting | No enabled mount in the inspected host wiring | Remains client-only; no durable service added here |
+
+Qualify Neo first, complete its GFTB workload proof, then qualify PZM and
+Yoga independently. Run the same reviewed source through each host's local
+`just nix-switch-local` with the host's actual Home Manager attribute from
+lab inventory. Check both the active generation and effective mount settings
+afterwards. Do not infer a running mount from a source enable flag, successful
+decryption, an old acceptance comment, or a configured daily-switch flag.
+
+Keep the existing org scope. This rollout neither promotes another org nor
+rotates credentials. Softconnect observation/admission is adjacent work,
+not authority to restart mounts, stop applications or reboot hosts.
 
 Before step 5 doctor reports the `orgs.json` defaults; from step 5 on it reads
 `<stateDir>/effective-settings.json` and reports this host's resolved settings,

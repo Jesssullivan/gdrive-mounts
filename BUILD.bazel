@@ -6,7 +6,8 @@ are `rules_shell` `sh_test`s that exec the exact scripts/*.sh the justfile
 calls — no bazel-only validation logic is duplicated here.
 
 Tools come from the ambient flake devShell PATH, not a Bazel toolchain: jq,
-rclone, gitleaks, sqlite, check-jsonschema. `.bazelrc`'s `test --test_env=PATH`
+rclone, gitleaks, sqlite, check-jsonschema, Python with Pillow/HEIF.
+`.bazelrc`'s `test --test_env=PATH`
 line forwards the invoking shell's PATH into the test's runtime environment,
 so these targets only pass when the invoking shell is already inside the
 devShell. The operator entrypoint is `just bazel-test`, which runs
@@ -79,12 +80,12 @@ filegroup(
     ]),
 )
 
-# All shell scripts, including scripts/lib/common.sh — sourced by name, so
+# All scripts, including scripts/lib/common.sh — sourced by name, so
 # every test that runs any script needs the full set as data, not just the
 # one script named in `srcs`.
 filegroup(
     name = "scripts",
-    srcs = glob(["scripts/**/*.sh"]),
+    srcs = glob(["scripts/**/*.sh", "scripts/**/*.py"]),
 )
 
 sh_test(
@@ -124,6 +125,27 @@ sh_test(
         ":config_sources",
         ":scripts",
     ],
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
+)
+
+sh_test(
+    name = "photos_test",
+    srcs = ["scripts/test-photos.sh"],
+    data = [":scripts"],
+    env = {"GDM_PHOTOS_REQUIRE_CODECS": "1"},
+    tags = [
+        "local",
+        "requires-network=no",
+    ],
+)
+
+sh_test(
+    name = "maintenance_test",
+    srcs = ["scripts/test-maintenance.sh"],
+    data = [":scripts"],
     tags = [
         "local",
         "requires-network=no",
@@ -225,6 +247,8 @@ test_suite(
         ":endpoint_free_test",
         ":hm_eval_test",
         ":lib_test",
+        ":maintenance_test",
+        ":photos_test",
         ":repo_manifest_test",
         ":secrets_scan_history_test",
         ":secrets_scan_test",

@@ -13,6 +13,7 @@ Public repo (visibility flipped 2026-08-18 so `lab` CI can fetch it as a flake i
 nix develop --command just check    # all local gates
 just --list                          # every recipe, inside the devShell
 just doctor                          # live state, once secrets are wired
+just photos --help                   # manifest-bound GFTB consolidation (optional photo runtime)
 ```
 
 ## CI

@@ -11,8 +11,9 @@
 | `docs/tracker.md` | Linear project link and the draft-issue → filed-ID map |
 | `docs/STYLE.md` | Pointer to `lab`'s writing standard |
 | `docs/evidence/README.md` | What counts as evidence here and how to name it |
+| `docs/agent-notes/INDEX.md` | Sanitized implementation and admission receipts |
 | `docs/evidence/TEMPLATE-mount-bakeoff.md` | The mount-backend bakeoff evidence template |
 | `docs/agent-enrolment.md` | Agent enrolment (part 1): the org model, RO/RW posture layers, secret lifecycle stations, the three-part promotion ceremony (sulliwood 2026-08-22 worked example), new-org lace-up condensation |
 | `docs/agent-oauth-setup.md` | Agent OAuth setup (part 2): mint mechanics, scope table, token-scope verification probes, refresh/rotation, failure table |
 | `docs/agent-navigate-explore.md` | Agent navigation (part 3): enumerating mounts, the parent-is-local trap and mount-liveness guards, index queries, Python/fish exploration patterns, rate-limit posture |
-| `docs/agent-symbolic-manipulation.md` | Agent symbolic manipulation (part 4): liveness+writability probes, the idempotent WebP conversion pipeline (python + fish), Drive-side verification, soft+RW durability, post-switch validation checklist |
+| `docs/agent-symbolic-manipulation.md` | Agent symbolic manipulation (part 4): manifest-bound photo plan/apply/verify/retire, corrected WebP preservation, content verification and recoverable retirement |
