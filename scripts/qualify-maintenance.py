@@ -39,6 +39,9 @@ HEARTBEAT_MAX_AGE = 3
 COMMAND_TIMEOUT = 5
 LEASE_SECONDS = 240
 FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command")
+STATE_VALUES = {"running", "waiting", "exited", "not running", "spawn scheduled", "spawn pending"}
+REASON_VALUES = {"none", "crash", "signal", "normal", "exit", "watchdog", "resource"}
+MAX_EVENTS_BYTES = 64 * 1024
 
 
 class QualificationError(RuntimeError):
@@ -82,19 +85,40 @@ def fixture_plist(label, directory, interpreter, source):
     }
 
 
-def child(directory):
-    """Disposable worker; unsuccessful exits are requested through its file."""
-    require(platform.system() == "Darwin", "fixture worker is Darwin-only")
+def worker_directory(directory):
     directory = private_parent(directory)
     require(directory.name.startswith("gdrive-maintenance-"), "unexpected fixture directory name")
+    return directory
+
+
+def worker_event(directory, kind, **fields):
+    record = {"event": kind, "pid": os.getpid(), "time": time.monotonic(), **fields}
+    payload = (json.dumps(record, sort_keys=True) + "\n").encode()
+    require(len(payload) <= 1024, "fixture event exceeds its bound")
+    fd = os.open(directory / "events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "ab") as stream:
+        stream.write(payload)
+
+
+def child(directory):
+    """Darwin-only public worker entry; no launchctl calls occur in the child."""
+    require(platform.system() == "Darwin", "fixture worker is Darwin-only")
+    return _worker(directory)
+
+
+def _worker(directory):
+    """Worker body, also exercised by an ordinary subprocess in offline tests."""
+    directory = worker_directory(directory)
+    os.umask(0o077)  # launchd does not inherit the controller's process umask.
+    worker_event(directory, "child-startup")
     lease = json.loads((directory / "lease.json").read_text())
-    require(lease["expires"] <= time.monotonic() + LEASE_SECONDS, "fixture lease exceeds its bound")
+    require(type(lease.get("expires")) in (int, float), "fixture lease expiry must be numeric")
+    require(time.monotonic() < lease["expires"] <= time.monotonic() + LEASE_SECONDS,
+            "fixture lease is expired or exceeds its bound")
     pid = os.getpid()
 
     def event(kind, **fields):
-        with (directory / "events.jsonl").open("a") as stream:
-            stream.write(json.dumps({"event": kind, "pid": pid,
-                                     "time": time.monotonic(), **fields}) + "\n")
+        worker_event(directory, kind, **fields)
 
     def signalled(number, _frame):
         event("signal", number=number)
@@ -120,6 +144,26 @@ def child(directory):
     return 0
 
 
+def child_entry(directory):
+    """Retain a bounded structured failure, never an exception message or traceback."""
+    if platform.system() != "Darwin":
+        print("qualify-maintenance: fixture worker is Darwin-only", file=sys.stderr)
+        return 2
+    try:
+        return child(directory)
+    except (QualificationError, OSError, ValueError, KeyError, TypeError) as exc:
+        fields = {"category": "guard" if isinstance(exc, QualificationError) else
+                  "os-error" if isinstance(exc, OSError) else "invalid-input"}
+        if isinstance(exc, OSError) and type(exc.errno) is int:
+            fields["errno"] = exc.errno
+        try:
+            worker_event(worker_directory(directory), "startup-error", **fields)
+        except (QualificationError, OSError, ValueError):
+            pass  # No validated writable fixture means no child evidence, not never-exec proof.
+        print("qualify-maintenance: fixture startup failed; structured evidence only", file=sys.stderr)
+        return 2
+
+
 class Fixture:
     def __init__(self, directory, label):
         self.directory = directory
@@ -130,6 +174,8 @@ class Fixture:
         self.known_pids = set()
         self.clock = time.monotonic
         self.sleep = time.sleep
+        self.last_observed_state = None
+        self.phase = "preflight"
 
     def launchctl(self, *args, missing_ok=False):
         try:
@@ -153,8 +199,18 @@ class Fixture:
             return None
         pid = re.search(r"^\s*pid = ([0-9]+)\s*$", output, re.MULTILINE)
         last_exit = re.search(r"^\s*last exit code = ([0-9]+)\s*$", output, re.MULTILINE)
-        return {"pid": int(pid[1]) if pid else None,
-                "last_exit": int(last_exit[1]) if last_exit else None}
+        result = {"pid": int(pid[1]) if pid else None,
+                  "last_exit": int(last_exit[1]) if last_exit else None}
+        for label, key, allowed in (("state", "state", STATE_VALUES), ("reason", "reason", REASON_VALUES)):
+            match = re.search(r"^\s*" + label + r" = ([^\r\n]+)$", output, re.MULTILINE)
+            if match:
+                result[key] = match[1].strip() if match[1].strip() in allowed else "unrecognized"
+        for label, key in (("runs", "runs"), ("last terminating signal", "last_signal"),
+                           ("last spawn error", "spawn_errno")):
+            match = re.search(r"^\s*" + label + r" = ([0-9]+)\s*$", output, re.MULTILINE)
+            if match:
+                result[key] = int(match[1])
+        return result
 
     def events(self):
         path = self.directory / "events.jsonl"
@@ -162,9 +218,34 @@ class Fixture:
             return []
         # An incomplete last write is unavailable observation, never a clean pass.
         try:
-            return [json.loads(line) for line in path.read_text().splitlines()]
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as stream:
+                raw = stream.read(MAX_EVENTS_BYTES + 1)
+            require(len(raw) <= MAX_EVENTS_BYTES, "fixture event log exceeds its observation bound")
+            return [json.loads(line) for line in raw.splitlines()]
         except (ValueError, OSError) as exc:
             raise QualificationError("fixture event log unavailable") from exc
+
+    def startup_diagnostics(self):
+        """Allowlisted evidence only, using the state already sampled by probes."""
+        result = {"phase": self.phase, "last_observed_state": self.last_observed_state,
+                  "heartbeat_present": (self.directory / "heartbeat.json").is_file()}
+        try:
+            events = self.events()
+            result["event_count"] = len(events)
+            result["child_startup_events"] = sum(row.get("event") == "child-startup" for row in events)
+            errors = [row for row in events if row.get("event") == "startup-error"]
+            result["startup_error_count"] = len(errors)
+            result["child_startup_evidence"] = "observed" if result["child_startup_events"] else "unavailable"
+            if errors:
+                error = errors[-1]
+                result["startup_error"] = {"category": error.get("category") if error.get("category") in
+                                           {"guard", "os-error", "invalid-input"} else "unrecognized"}
+                if type(error.get("errno")) is int:
+                    result["startup_error"]["errno"] = error["errno"]
+        except (QualificationError, OSError, ValueError, TypeError, AttributeError):
+            result["events_available"] = False
+        return result
 
     def heartbeat(self, pid):
         try:
@@ -182,17 +263,27 @@ class Fixture:
             self.sleep(1)
         raise QualificationError(message)
 
-    def running(self, previous=None):
+    def remember_pid(self, pid):
+        require(type(pid) is int and pid > 1 and pid != os.getpid(), "invalid fixture PID")
+        self.known_pids.add(pid)
+
+    def observed_state(self):
         state = self.state()
+        self.last_observed_state = state
+        if state and state.get("pid") is not None:
+            # Cleanup needs every observed process, even one that never writes
+            # a heartbeat or startup event. Observation is not a passing control.
+            self.remember_pid(state["pid"])
+        return state
+
+    def running(self, previous=None):
+        state = self.observed_state()
         if state and state["pid"] and state["pid"] != previous and self.heartbeat(state["pid"]):
-            pid = state["pid"]
-            require(pid > 1 and pid != os.getpid(), "invalid fixture PID")
-            self.known_pids.add(pid)
-            return pid
+            return state["pid"]
         return None
 
     def assert_live(self, pid):
-        state = self.state()
+        state = self.observed_state()
         require(state and state["pid"] == pid and self.heartbeat(pid),
                 "disable did not preserve the live PID and fresh heartbeat")
         require(not any(item["event"] == "signal" for item in self.events()),
@@ -209,7 +300,7 @@ class Fixture:
         (self.directory / "command").write_text(f"exit-42:{pid}")
 
     def failed(self, pid):
-        state = self.state()
+        state = self.observed_state()
         require(state is not None, "fixture unexpectedly unloaded")
         exits = [item for item in self.events()
                  if item["event"] == "exit" and item["pid"] == pid and item.get("code") == 42]
@@ -225,19 +316,23 @@ class Fixture:
     def qualify(self):
         require(self.state() is None, "random fixture label already exists; refusing to adopt it")
         self.touched = True  # bootstrap can act even if its response times out.
+        self.phase = "initial-start"
         self.launchctl("bootstrap", self.domain, str(self.directory / "job.plist"))
         first = self.wait_for(self.running, 20, "fixture did not start with a fresh heartbeat")
+        self.phase = "positive-control"
         self.request_failure(first)
         self.wait_for(lambda: self.failed(first), 10, "positive control did not report exit 42")
         second = self.wait_for(lambda: self.running(first), 45,
                                "enabled unsuccessful-exit restart was not observed")
         require(sum(item["event"] == "start" for item in self.events()) == 2,
                 "unexpected positive-control launch count")
+        self.phase = "disabled-control"
         self.launchctl("disable", self.target)
         self.observe(lambda: self.assert_live(second), LIVE_SECONDS)
         self.request_failure(second)
         self.wait_for(lambda: self.failed(second), 10, "disabled fixture did not report exit 42")
         self.observe(lambda: self.assert_no_respawn(second, 2), NO_RESPAWN_SECONDS)
+        self.phase = "reenable-control"
         self.launchctl("enable", self.target)
         # No -k: never replace a live process to make the re-enable test pass.
         self.launchctl("kickstart", self.target)
@@ -261,12 +356,12 @@ class Fixture:
                 errors.append(str(exc))
             # A failed enable must not skip the one owned-job removal attempt.
             try:
-                if self.state() is not None:
+                if self.observed_state() is not None:
                     self.launchctl("bootout", self.target)
-                self.wait_for(lambda: self.state() is None, 10, "fixture remained loaded after cleanup")
+                self.wait_for(lambda: self.observed_state() is None, 10, "fixture remained loaded after cleanup")
                 for item in self.events():
-                    if item["event"] == "start":
-                        self.known_pids.add(item["pid"])
+                    if item["event"] in {"child-startup", "start"}:
+                        self.remember_pid(item["pid"])
                 self.wait_for(lambda: not any(pid_alive(pid) for pid in self.known_pids),
                               10, "fixture PID still exists; refusing file cleanup")
             except QualificationError as exc:
@@ -336,6 +431,7 @@ def main(argv=None):
         receipt["qualification"] = "passed"
     except (QualificationError, OSError, ValueError, KeyboardInterrupt) as exc:
         receipt["error"] = str(exc) if not isinstance(exc, KeyboardInterrupt) else "interrupted"
+        receipt["startup_diagnostics"] = fixture.startup_diagnostics()
     finally:
         try:
             fixture.cleanup()
@@ -353,7 +449,7 @@ def main(argv=None):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--fixture-child":
-        sys.exit(child(sys.argv[2]))
+        sys.exit(child_entry(sys.argv[2]))
     try:
         sys.exit(main())
     except (QualificationError, OSError, ValueError) as error:

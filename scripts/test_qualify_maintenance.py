@@ -5,7 +5,9 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -138,6 +140,59 @@ class QualificationTests(unittest.TestCase):
                 fixture.cleanup()
         remove.assert_not_called()
 
+    def test_cleanup_checks_observed_pid_without_heartbeat_or_start_event(self):
+        for observed_before_cleanup in (False, True):
+            with self.subTest(observed_before_cleanup=observed_before_cleanup):
+                fixture = SimulatedFixture()
+                fixture.loaded, fixture.touched, fixture.pid = True, True, 70454
+                fixture.heartbeat = Mock(return_value=False)
+                self.assertEqual(fixture.events(), [])
+                if observed_before_cleanup:
+                    self.assertIsNone(fixture.running())
+                    self.assertIn(70454, fixture.known_pids)
+                with patch.object(q, "pid_alive", return_value=True) as alive, \
+                        patch.object(q, "remove_fixture_files") as remove:
+                    with self.assertRaisesRegex(q.QualificationError, "PID still exists"):
+                        fixture.cleanup()
+                self.assertFalse(fixture.loaded)
+                self.assertIn(("bootout", fixture.target), fixture.calls)
+                self.assertIn(70454, fixture.known_pids)
+                alive.assert_called_with(70454)
+                remove.assert_not_called()
+
+    def test_cleanup_tracks_pid_first_seen_while_waiting_for_unload(self):
+        fixture = SimulatedFixture()
+        fixture.touched = True
+        fixture.state = Mock(side_effect=[{"pid": None, "last_exit": 42},
+                                         {"pid": 70455, "last_exit": 42}, None])
+        with patch.object(q, "pid_alive", return_value=True) as alive, \
+                patch.object(q, "remove_fixture_files") as remove:
+            with self.assertRaisesRegex(q.QualificationError, "PID still exists"):
+                fixture.cleanup()
+        self.assertIn(70455, fixture.known_pids)
+        alive.assert_called_with(70455)
+        remove.assert_not_called()
+
+    def test_invalid_observed_pid_is_never_accepted_or_probed(self):
+        for pid in (True, 0, 1, -1, "70454", os.getpid()):
+            with self.subTest(pid=pid):
+                fixture = SimulatedFixture()
+                fixture.loaded, fixture.pid = True, pid
+                with self.assertRaisesRegex(q.QualificationError, "invalid fixture PID"):
+                    fixture.running()
+                self.assertEqual(fixture.known_pids, set())
+
+    def test_child_startup_pid_without_start_event_blocks_file_cleanup(self):
+        fixture = SimulatedFixture()
+        fixture.touched = True
+        fixture.records = [{"event": "child-startup", "pid": 70456}]
+        with patch.object(q, "pid_alive", return_value=True) as alive, \
+                patch.object(q, "remove_fixture_files") as remove:
+            with self.assertRaisesRegex(q.QualificationError, "PID still exists"):
+                fixture.cleanup()
+        alive.assert_called_with(70456)
+        remove.assert_not_called()
+
     def test_cleanup_refusal_is_not_ignored(self):
         fixture = SimulatedFixture()
         fixture.qualify()
@@ -195,6 +250,36 @@ class QualificationTests(unittest.TestCase):
         output = "\tpid = 412\n\tlast exit code = 42\n\tenvironment = { PRIVATE_VALUE = withheld }\n"
         with patch.object(q.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
             self.assertEqual(fixture.state(), {"pid": 412, "last_exit": 42})
+
+    def test_state_parser_allowlists_startup_fields_and_reason_values(self):
+        fixture = q.Fixture(Path("/unused"), q.PREFIX + "test")
+        output = ("\tstate = exited\n\tlast exit code = 2\n\truns = 1\n"
+                  "\tlast spawn error = 13\n\treason = PRIVATE_ENV_VALUE\n"
+                  "\tenvironment = { PRIVATE_VALUE = withheld }\n")
+        with patch.object(q.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
+            evidence = fixture.state()
+        self.assertEqual(evidence, {"pid": None, "last_exit": 2, "state": "exited", "runs": 1,
+                                    "spawn_errno": 13, "reason": "unrecognized"})
+        self.assertNotIn("PRIVATE", json.dumps(evidence))
+
+    def test_startup_timeout_retains_last_exit_without_claiming_never_exec(self):
+        fixture = q.Fixture(Path("/unused/gdrive-maintenance-synthetic"), q.PREFIX + "test")
+        moment = [0]
+        fixture.clock = lambda: moment[0]
+        fixture.sleep = lambda seconds: moment.__setitem__(0, moment[0] + seconds)
+        failed = {"pid": None, "last_exit": 2, "state": "exited", "runs": 1}
+        fixture.state = Mock(side_effect=[None, *([failed] * 20)])
+        fixture.launchctl = Mock()
+        fixture.events = Mock(return_value=[])
+        with self.assertRaisesRegex(q.QualificationError, "fresh heartbeat"):
+            fixture.qualify()
+        with patch.object(q.Path, "is_file", return_value=False):
+            evidence = fixture.startup_diagnostics()
+        self.assertEqual(evidence["last_observed_state"], failed)
+        self.assertEqual(evidence["event_count"], 0)
+        self.assertEqual(evidence["child_startup_evidence"], "unavailable")
+        self.assertEqual(evidence["phase"], "initial-start")
+        fixture.launchctl.assert_called_once_with("bootstrap", fixture.domain, str(fixture.directory / "job.plist"))
 
     def test_non_darwin_and_unattended_refuse_before_mkdtemp_or_launchctl(self):
         for system, attended in (("Linux", True), ("Darwin", False)):
@@ -264,6 +349,87 @@ class PrivateFileTests(unittest.TestCase):
         with self.assertRaisesRegex(q.QualificationError, "unexpected fixture artifact"):
             q.remove_fixture_files(directory)
         self.assertEqual(target.read_text(), "preserve")
+
+    def worker_fixture(self):
+        directory = Path(tempfile.mkdtemp(prefix="gdrive-maintenance-", dir=self.parent))
+        (directory / "lease.json").write_text(json.dumps({"expires": time.monotonic() + 20}))
+        return directory
+
+    def test_worker_runs_in_ordinary_subprocess_and_writes_real_heartbeat(self):
+        directory = self.worker_fixture()
+        if q.platform.system() == "Darwin":
+            # Exercise the exact public child argv on its supported platform.
+            command = [sys.executable, str(SOURCE.resolve()), "--fixture-child", str(directory)]
+        else:
+            # Linux CI executes the same real worker body, not fake heartbeat,
+            # PID, clock or filesystem observations. The CLI Darwin guard is
+            # tested independently and is never relaxed in production.
+            script = ("import importlib.util,sys; "
+                      "s=importlib.util.spec_from_file_location('worker',sys.argv[1]); "
+                      "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                      "sys.exit(m._worker(sys.argv[2]))")
+            command = [sys.executable, "-c", script, str(SOURCE.resolve()), str(directory)]
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=environment) as process:
+            (directory / "command").write_text(f"exit-42:{process.pid}")
+            stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 42, stderr)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        fixture = q.Fixture(directory, q.PREFIX + "test")
+        events = fixture.events()
+        self.assertEqual([row["event"] for row in events], ["child-startup", "start", "exit"])
+        self.assertTrue(all(row["pid"] == process.pid for row in events))
+        self.assertTrue(fixture.heartbeat(process.pid))
+        self.assertEqual(events[-1]["code"], 42)
+        self.assertEqual((directory / "events.jsonl").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((directory / "heartbeat.json").stat().st_mode & 0o777, 0o600)
+
+    def test_child_failure_is_structured_without_exception_text(self):
+        directory = self.worker_fixture()
+        (directory / "lease.json").write_text("PRIVATE_MALFORMED_LEASE_VALUE")
+        with patch.object(q.platform, "system", return_value="Darwin"), patch.object(q.sys, "stderr"):
+            self.assertEqual(q.child_entry(str(directory)), 2)
+        fixture = q.Fixture(directory, q.PREFIX + "test")
+        events = fixture.events()
+        self.assertEqual([row["event"] for row in events], ["child-startup", "startup-error"])
+        evidence = fixture.startup_diagnostics()
+        self.assertEqual(evidence["child_startup_evidence"], "observed")
+        self.assertEqual(evidence["startup_error"], {"category": "invalid-input"})
+        self.assertNotIn("PRIVATE", json.dumps(events) + json.dumps(evidence))
+        self.assertFalse(evidence["heartbeat_present"])
+
+    def test_child_platform_refusal_never_enters_worker_or_writes_events(self):
+        directory = self.worker_fixture()
+        with patch.object(q.platform, "system", return_value="Linux"), \
+                patch.object(q, "_worker") as worker, patch.object(q.sys, "stderr"):
+            self.assertEqual(q.child_entry(str(directory)), 2)
+        worker.assert_not_called()
+        self.assertFalse((directory / "events.jsonl").exists())
+
+    def test_event_observation_is_bounded_and_refuses_symlinks(self):
+        directory = self.worker_fixture()
+        event_path = directory / "events.jsonl"
+        event_path.write_bytes(b"x" * (q.MAX_EVENTS_BYTES + 1))
+        fixture = q.Fixture(directory, q.PREFIX + "test")
+        with self.assertRaisesRegex(q.QualificationError, "observation bound"):
+            fixture.events()
+        evidence = fixture.startup_diagnostics()
+        self.assertFalse(evidence["events_available"])
+        event_path.unlink()
+        event_path.symlink_to(directory / "lease.json")
+        with self.assertRaises(q.QualificationError):
+            fixture.events()
+
+    def test_startup_error_category_is_allowlisted(self):
+        directory = self.worker_fixture()
+        (directory / "events.jsonl").write_text(json.dumps({"event": "startup-error", "pid": 1,
+                                                          "category": "PRIVATE_VALUE", "errno": 13}) + "\n")
+        fixture = q.Fixture(directory, q.PREFIX + "test")
+        evidence = fixture.startup_diagnostics()
+        self.assertEqual(evidence["startup_error"], {"category": "unrecognized", "errno": 13})
+        self.assertNotIn("PRIVATE", json.dumps(evidence))
 
 
 if __name__ == "__main__":

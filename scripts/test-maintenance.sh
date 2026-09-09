@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Synthetic controller tests only: never invoke launchctl or create a service.
+# Simulated controllers and an ordinary worker child: never create a service.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 d="$(cd "$(dirname "$0")" && pwd)"
