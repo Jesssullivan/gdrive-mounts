@@ -476,6 +476,14 @@ It does not stop, inspect or recover the real mount and does not prove upload
 drainage or the separate watchdog's `KeepAlive = true` behavior. A failed or
 inconclusive result blocks recovery.
 
+`--startup-only` selects a separate diagnostic experiment and performs no restart
+or disable control. A native shell writes a pre-interpreter marker, then Python
+runs with `-I -B` and records entry before loading the controller. On failure,
+the tool captures the still-live owned PID and start identity, bounded native
+stack frames and cwd when available, then cleans up its fixture. These markers
+distinguish shell/exec, interpreter initialization and controller/worker startup.
+Unavailable observations remain unavailable; this mode does not qualify recovery.
+
 A native Neo 26.7 observation on 2026-09-09 reached the disabled control and
 observed a replacement PID after exit 42 despite successful `launchctl disable`.
 The fixture cleaned up; disabling a loaded job is not an accepted restart barrier.

@@ -105,6 +105,13 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(all(call[1] == fixture.target for call in fixture.calls[1:]))
         self.assertNotIn("-k", [arg for call in fixture.calls for arg in call])
 
+    def test_startup_only_does_not_issue_restart_or_disable_controls(self):
+        fixture = SimulatedFixture()
+        result = fixture.qualify_startup()
+        self.assertTrue(result["startup_ready"])
+        self.assertEqual([call[0] for call in fixture.calls], ["bootstrap"])
+        self.assertIn("startup diagnostic only", result["scope"])
+
     def test_failure_paths_cannot_pass(self):
         for behavior in ("signal-on-disable", "stop-on-disable", "stalled-heartbeat",
                          "disable-ignored", "unsupported", "no-positive-restart",
@@ -280,7 +287,10 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(item["ProcessType"], "Background")
         self.assertTrue(item["RunAtLoad"])
         self.assertEqual(item["ThrottleInterval"], 30)
-        self.assertEqual(item["ProgramArguments"], ["/python", str(SOURCE), "--fixture-child", "/private-fixture"])
+        self.assertEqual(item["ProgramArguments"][:2], ["/bin/sh", "-c"])
+        self.assertIn("exec /python -I -B -c", item["ProgramArguments"][2])
+        self.assertIn("pre-interpreter", item["ProgramArguments"][2])
+        self.assertEqual(item["StandardOutPath"], "/private-fixture/pre-interpreter.jsonl")
         self.assertNotIn("rclone", json.dumps(item))
 
     def test_launchctl_only_accepts_exact_missing_service_error(self):
@@ -414,6 +424,34 @@ class PrivateFileTests(unittest.TestCase):
 
     def test_clean_exit_worker_returns_zero_with_matching_exit_record(self):
         self.run_worker(0)
+
+    def test_bootstrap_records_both_entries_and_ignores_pythonpath_customization(self):
+        directory = self.worker_fixture()
+        injection = self.parent / "sitecustomize.py"
+        marker = self.parent / "unexpected-site-hook"
+        injection.write_text("from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n")
+        # Linux uses the real worker body through a tiny test wrapper because
+        # the public Darwin guard remains intact. The launchd bootstrap itself
+        # is identical on both platforms and executes in a real subprocess.
+        worker = SOURCE.resolve()
+        if q.platform.system() != "Darwin":
+            worker = directory / "worker.py"
+            worker.write_text("import importlib.util,sys\n"
+                              "s=importlib.util.spec_from_file_location('q'," + repr(str(SOURCE.resolve())) + ")\n"
+                              "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
+                              "sys.exit(m._worker(sys.argv[2]))\n")
+        item = q.fixture_plist(q.PREFIX + "test", directory, sys.executable, worker)
+        env = {**os.environ, "PYTHONPATH": str(self.parent), "PYTHONDONTWRITEBYTECODE": "1"}
+        with subprocess.Popen(item["ProgramArguments"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=env) as process:
+            (directory / "command").write_text(f"exit-0:{process.pid}")
+            stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(json.loads(stdout), {"phase": "pre-interpreter", "pid": process.pid})
+        self.assertEqual(json.loads((directory / "python-entry.json").read_text()),
+                         {"phase": "python-entry", "pid": process.pid})
+        self.assertFalse(marker.exists())
+        self.assertTrue(q.Fixture(directory, q.PREFIX + "test").heartbeat(process.pid))
 
     def run_worker(self, exit_code):
         directory = self.worker_fixture()

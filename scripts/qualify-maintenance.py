@@ -40,7 +40,7 @@ LIVE_SECONDS = 5
 HEARTBEAT_MAX_AGE = 3
 COMMAND_TIMEOUT = 5
 LEASE_SECONDS = 240
-FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command", "startup.err", "capture-client", "watchdog.sh", "capture.log", "capture-mode", "capture.sock", "restart-intent", "restart-floor")
+FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command", "startup.err", "pre-interpreter.jsonl", "python-entry.json", "startup.sample", "capture-client", "watchdog.sh", "capture.log", "capture-mode", "capture.sock", "restart-intent", "restart-floor")
 LEGACY_WATCHDOG_SHA256 = "8768d03483995c301c5bd721f5979edbf02e8c76978fb6f0c02411e29b832e2d"
 STATE_VALUES = {"running", "waiting", "exited", "not running", "spawn scheduled", "spawn pending"}
 REASON_VALUES = {"none", "crash", "signal", "normal", "exit", "watchdog", "resource"}
@@ -74,16 +74,27 @@ def private_parent(value):
 
 
 def fixture_plist(label, directory, interpreter, source):
+    bootstrap = (
+        "import os, sys\n"
+        f"fd = os.open({str(directory / 'python-entry.json')!r}, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)\n"
+        "os.write(fd, ('{\"phase\":\"python-entry\",\"pid\":%d}\\n' % os.getpid()).encode())\n"
+        "os.close(fd)\n"
+        "import runpy\n"
+        f"sys.argv = [{str(source)!r}] + sys.argv[1:]\n"
+        f"runpy.run_path({str(source)!r}, run_name='__main__')\n"
+    )
+    entry = ("umask 077\nprintf '{\"phase\":\"pre-interpreter\",\"pid\":%s}\\n' \"$$\"\nexec " +
+             shlex.join([interpreter, "-I", "-B", "-c", bootstrap, "--fixture-child", str(directory)]))
     return {
         "Label": label,
-        "ProgramArguments": [interpreter, str(source), "--fixture-child", str(directory)],
+        "ProgramArguments": ["/bin/sh", "-c", entry],
         "KeepAlive": {"SuccessfulExit": False},
         "ProcessType": "Background",
         "RunAtLoad": True,
         "ThrottleInterval": THROTTLE,
         "ExitTimeOut": 5,
         "EnvironmentVariables": {"PYTHONDONTWRITEBYTECODE": "1"},
-        "StandardOutPath": "/dev/null",
+        "StandardOutPath": str(directory / "pre-interpreter.jsonl"),
         # Interpreter/loader failures occur before worker_event can run. Keep
         # this owned private stream until diagnostics classify it; never print
         # raw stderr or inherited environment values in the public receipt.
@@ -274,6 +285,51 @@ class Fixture:
             }
         except OSError:
             result["interpreter_stderr"] = {"available": False}
+        for name in ("pre-interpreter.jsonl", "python-entry.json"):
+            try:
+                fd = os.open(self.directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as stream:
+                    require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "startup marker is not regular")
+                    raw = stream.read(4097)
+                require(len(raw) <= 4096, "startup marker exceeds bound")
+                rows = [json.loads(line) for line in raw.splitlines()]
+                result[name] = [{"pid": row["pid"], "phase": row["phase"]} for row in rows
+                                if type(row.get("pid")) is int and row.get("phase") in {"pre-interpreter", "python-entry"}]
+            except (QualificationError, OSError, ValueError, KeyError, TypeError, AttributeError):
+                result[name] = "unavailable"
+        if self.touched and platform.system() == "Darwin":
+            try:
+                current = self.observed_state()
+                pid = current.get("pid") if current else None
+                if pid:
+                    process = native_process_snapshot().get(pid)
+                    require(process is not None, "startup process disappeared before attribution")
+                    result["live_process"] = {"pid": pid, **process}
+                    # Only this still-live owned fixture is sampled. No grants,
+                    # elevated attach, raw environment or production PID fallback.
+                    sample = subprocess.run(["/usr/bin/sample", str(pid), "1", "10", "-mayDie",
+                                             "-file", str(self.directory / "startup.sample")],
+                                            capture_output=True, timeout=5, check=False)
+                    info = {"exit": sample.returncode}
+                    path = self.directory / "startup.sample"
+                    if path.exists():
+                        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                        with os.fdopen(fd, "rb") as stream:
+                            require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "sample is not regular")
+                            raw = stream.read(256 * 1024 + 1)
+                        info.update({"bytes_observed": len(raw), "truncated": len(raw) > 256 * 1024,
+                                     "sha256": hashlib.sha256(raw).hexdigest(),
+                                     "frames": [line.strip() for line in raw.decode(errors="replace").splitlines()
+                                                if re.match(r"^\s*\+*\s*\d+\s+\S", line)][:128]})
+                    result["native_sample"] = info
+                    after = native_process_snapshot().get(pid)
+                    result["same_process_after_sample"] = after == process
+                    cwd = subprocess.run(["/usr/sbin/lsof", "-nP", "-b", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                                         capture_output=True, text=True, timeout=5, check=False)
+                    result["cwd"] = [line[1:] for line in cwd.stdout.splitlines() if line.startswith("n")][:1]
+                    result["cwd_probe_exit"] = cwd.returncode
+            except (QualificationError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                result["live_attribution"] = "unavailable: " + type(exc).__name__
         return result
 
     def heartbeat(self, pid):
@@ -376,6 +432,15 @@ class Fixture:
                 "no_handled_control_signal": True, "disabled_no_respawn_seconds": NO_RESPAWN_SECONDS,
                 "throttle_seconds": THROTTLE, "reenable_start_observed": True,
                 "fixture_pids": [first, second, third]}
+
+    def qualify_startup(self):
+        require(self.state() is None, "random fixture label already exists; refusing to adopt it")
+        self.touched = True
+        self.phase = "startup-only"
+        self.launchctl("bootstrap", self.domain, str(self.directory / "job.plist"))
+        pid = self.wait_for(self.running, 20, "fixture did not start with a fresh heartbeat")
+        return {"startup_ready": True, "fixture_pids": [pid],
+                "scope": "startup diagnostic only; no supervision, mount or upload-drain qualification"}
 
     def cleanup(self, preserve_files=False):
         if self.touched:
@@ -543,6 +608,8 @@ def qualify_watchdog_handover(parent, legacy_path):
                "mount_keepalive": {"SuccessfulExit": False}, "watchdog_keepalive": True,
                "throttle_seconds": THROTTLE, "abandon_process_group": "native default",
                "exit_timeout": "native default", "interpreter": interpreter,
+               "mount_interpreter": python, "mount_interpreter_isolated": True,
+               "mount_entry_shell": "/bin/sh",
                "scope": "owned native supervision and simulated clean exit only; no NFS mount or upload-drain proof"}
     try:
         for role in ("mount", "watchdog"):
@@ -562,7 +629,7 @@ def qualify_watchdog_handover(parent, legacy_path):
         mount.launchctl("bootstrap", mount.domain, str(mount.directory / "job.plist"))
         first = mount.wait_for(mount.running, 20, "owned mount positive control did not start")
         directory = watchdog.directory
-        client = "#!" + interpreter + "\nexec " + shlex.join([python, str(directory / "worker.py"), "--fixture-capture", str(directory)]) + "\n"
+        client = "#!" + interpreter + "\nexec " + shlex.join([python, "-I", "-B", str(directory / "worker.py"), "--fixture-capture", str(directory)]) + "\n"
         (directory / "capture-client").write_text(client)
         (directory / "capture-client").chmod(0o700)
         listener = socket.socket(socket.AF_UNIX)
@@ -694,9 +761,11 @@ def main(argv=None):
     parser.add_argument("--scratch-parent", required=True,
                         help="existing canonical, user-owned 0700 directory outside /tmp")
     parser.add_argument("--legacy-watchdog-script", help="qualify the inspected legacy capture/bootout handover instead of disable")
+    parser.add_argument("--startup-only", action="store_true", help="diagnose owned interpreter startup without restart/disable tests")
     args = parser.parse_args(argv)
     require(platform.system() == "Darwin", "qualification is Darwin-only")
     require(args.attended, "requires explicit --attended approval acknowledgment")
+    require(not (args.startup_only and args.legacy_watchdog_script), "select only one native experiment")
     require(os.getuid() != 0, "run as the ordinary GUI-session user, never root")
     parent = private_parent(args.scratch_parent)
     require(Path("/bin/launchctl").is_file(), "native launchctl unavailable")
@@ -717,6 +786,9 @@ def main(argv=None):
                "host": platform.node(), "machine": platform.machine(),
                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
                "interpreter": interpreter, "scratch_directory": str(directory),
+               "interpreter_isolated": True, "entry_shell": "/bin/sh",
+               "declared_environment": {"PYTHONDONTWRITEBYTECODE": "1"},
+               "working_directory": "native launchd default; observed on startup failure",
                "keepalive": {"SuccessfulExit": False}, "run_at_load": True,
                "process_type": "Background",
                "scope": "disposable launchd observation only; not mount recovery or upload-drain proof"}
@@ -731,7 +803,9 @@ def main(argv=None):
         (directory / "lease.json").write_text(json.dumps({"expires": time.monotonic() + LEASE_SECONDS}))
         with (directory / "job.plist").open("wb") as stream:
             plistlib.dump(fixture_plist(fixture.label, directory, interpreter, directory / "worker.py"), stream)
-        receipt.update(fixture.qualify())
+        receipt.update(fixture.qualify_startup() if args.startup_only else fixture.qualify())
+        if args.startup_only:
+            receipt["startup_diagnostics"] = fixture.startup_diagnostics()
         receipt["qualification"] = "passed"
     except (QualificationError, OSError, ValueError, KeyboardInterrupt) as exc:
         receipt["error"] = str(exc) if not isinstance(exc, KeyboardInterrupt) else "interrupted"
