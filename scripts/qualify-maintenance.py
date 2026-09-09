@@ -40,7 +40,7 @@ LIVE_SECONDS = 5
 HEARTBEAT_MAX_AGE = 3
 COMMAND_TIMEOUT = 5
 LEASE_SECONDS = 240
-FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command", "startup.err", "pre-interpreter.jsonl", "python-entry.json", "startup.sample", "capture-client", "watchdog.sh", "capture.log", "capture-mode", "capture.sock", "restart-intent", "restart-floor")
+FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command", "startup.err", "pre-interpreter.jsonl", "python-entry.json", "startup.sample", "capture-client", "watchdog.sh", "capture.log", "capture-mode", "capture.sock", "restart-intent", "handler-returned", "restart-floor")
 LEGACY_WATCHDOG_SHA256 = "8768d03483995c301c5bd721f5979edbf02e8c76978fb6f0c02411e29b832e2d"
 STATE_VALUES = {"running", "waiting", "exited", "not running", "spawn scheduled", "spawn pending"}
 REASON_VALUES = {"none", "crash", "signal", "normal", "exit", "watchdog", "resource"}
@@ -357,6 +357,24 @@ class Fixture:
                 result["live_attribution"] = "unavailable: " + type(exc).__name__
         return result
 
+    def descendant_diagnostics(self):
+        """Retain a point-in-time owned tree, never infer which child is waited."""
+        try:
+            identity = self.diagnostic_identity()
+            processes = native_process_snapshot()
+            require(processes.get(identity["pid"], {}).get("started") == identity["started"],
+                    "watchdog lifetime changed during descendant census")
+            descendants = owned_descendants(processes, identity["pid"])
+            require(len(descendants) <= 128, "owned descendant census exceeds its bound")
+            self.diagnostic_identity(identity)
+            return {"available": True, "identity": identity, "descendants": descendants,
+                    "native_launchctl_child_observed": any(
+                        pid != identity["pid"] and row["command"] == "launchctl"
+                        for pid, row in descendants.items()),
+                    "scope": "snapshot ancestry only; child presence does not identify the parent's wait"}
+        except (QualificationError, OSError, ValueError) as exc:
+            return {"available": False, "reason": type(exc).__name__ + ": descendant custody unavailable"}
+
     def heartbeat(self, pid):
         try:
             item = json.loads((self.directory / "heartbeat.json").read_text())
@@ -604,9 +622,12 @@ def watchdog_fixture_script(directory, mount_pid, mount_label, interpreter, runt
             "if ! gdm_fixture_active; then exec /bin/launchctl bootout \"$fixture_target\"; fi\n"
             "gdm_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }\n"
             "gdm_epoch() { date +%s; }\ngdm_pid_uptime() { printf 0; }\n"
-            "gdm_floor_blocks() { return 1; }\ngdm_record() { :; }\n"
+            "gdm_floor_blocks() { return 1; }\n"
+            "gdm_record() {\n"
+            f"  if [ \"$1\" = restarted ]; then printf '%s\\n' restarted > {q(str(directory / 'restart-intent'))}; fi\n"
+            "}\n"
             "gdm_log() { :; }\nnfsstat() { :; }\n" + capture + handler +
-            f"\ngdm_handle_wedge\nprintf '%s\\n' restart-intent > {q(str(directory / 'restart-intent'))}\n"
+            f"\ngdm_handle_wedge\nprintf '%s\\n' returned > {q(str(directory / 'handler-returned'))}\n"
             # Preserve the unconditional KeepAlive shape, but bound abandoned
             # fixtures by unloading this exact random label at static expiry.
             "while gdm_fixture_active; do sleep 1; done\n"
@@ -709,13 +730,16 @@ def qualify_watchdog_handover(parent, legacy_path):
         mount.wait_for(lambda: any(row.get("event") == "signal" and row.get("number") == signal.SIGQUIT
                                   and row.get("pid") == first for row in mount.events()),
                        20, "positive capture did not deliver observable SIGQUIT")
-        watchdog.wait_for(lambda: (directory / "restart-intent").is_file(), 10, "positive restart tail was not reached")
+        watchdog.wait_for(lambda: (directory / "handler-returned").is_file(), 10,
+                          "positive handler return was not observed within 10 seconds after SIGQUIT")
         bootout_watchdog()
         require(not pid_alive(first), "positive control mount worker did not exit")
         require(len(remember_capture()) == 5, "positive capture did not execute all five RC child calls")
-        receipt["positive_capture_sigquit_and_restart_intent"] = True
+        require((directory / "restart-intent").is_file(), "positive pre-kickstart intent was not observed")
         (directory / "restart-intent").unlink()
+        (directory / "handler-returned").unlink()
         second = mount.wait_for(lambda: mount.running(first), 20, "positive native restart did not replace the mount worker")
+        receipt["positive_capture_sigquit_handler_return_and_replacement"] = True
         prior_signals = [row for row in mount.events() if row.get("event") == "signal"]
         receipt["phase"] = "in-flight-capture-bootout"
         start_capture(second, "blocked")
@@ -730,6 +754,7 @@ def qualify_watchdog_handover(parent, legacy_path):
             require([row for row in mount.events() if row.get("event") == "signal"] == prior_signals,
                     "late signal reached the owned mount")
             require(not (directory / "restart-intent").exists(), "late restart tail survived watchdog bootout")
+            require(not (directory / "handler-returned").exists(), "late handler return survived watchdog bootout")
         # Observe beyond this actual child start's timeout + kill-after window,
         # as well as proving every recorded parent/descendant PID has exited.
         mount.observe(untouched_mount, max(LIVE_SECONDS, rows[-1]["time"] + 18 - time.monotonic()))
@@ -750,6 +775,13 @@ def qualify_watchdog_handover(parent, legacy_path):
                         "mount_pids": [first, second, third]})
     except (QualificationError, OSError, ValueError, KeyboardInterrupt) as exc:
         receipt["error"] = str(exc)
+        if len(fixtures) == 2:
+            watchdog = fixtures[1]
+            receipt["watchdog_failure_attribution"] = {
+                "restart_intent_observed": (watchdog.directory / "restart-intent").is_file(),
+                "handler_return_observed": (watchdog.directory / "handler-returned").is_file(),
+                "owned_processes": watchdog.descendant_diagnostics(),
+            }
         receipt["diagnostics"] = [item.startup_diagnostics() for item in fixtures]
     finally:
         if listener is not None:

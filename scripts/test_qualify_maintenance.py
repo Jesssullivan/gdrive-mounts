@@ -446,6 +446,64 @@ class PrivateFileTests(unittest.TestCase):
     def process_snapshot(self, started="Wed Sep 9 17:00:00 2026", command="sh"):
         return {700123: {"ppid": 1, "pgid": 700123, "started": started, "command": command}}
 
+    def descendant_fixture(self, census, after=None):
+        fixture = q.Fixture(self.worker_fixture(), q.PREFIX + "watchdog." + "b" * 32)
+        identity = {"pid": 700123, "started": "Wed Sep 9 17:00:00 2026"}
+        fixture.diagnostic_identity = Mock(side_effect=[identity, after or identity])
+        with patch.object(q, "native_process_snapshot", side_effect=census):
+            result = fixture.descendant_diagnostics()
+        return fixture, result
+
+    def test_owned_descendants_retained_with_label_lifetime_bracket(self):
+        processes = self.process_snapshot(command="bash")
+        processes[700124] = {"ppid": 700123, "pgid": 700124,
+                            "started": "Wed Sep 9 17:00:01 2026", "command": "launchctl"}
+        processes[700125] = {"ppid": 1, "pgid": 700125,
+                            "started": "Wed Sep 9 17:00:02 2026", "command": "unrelated"}
+        fixture, result = self.descendant_fixture([processes])
+        self.assertTrue(result["available"])
+        self.assertEqual(set(result["descendants"]), {700123, 700124})
+        self.assertTrue(result["native_launchctl_child_observed"])
+        self.assertEqual(fixture.diagnostic_identity.call_args_list[0].args, ())
+        self.assertEqual(fixture.diagnostic_identity.call_args_list[1].args, (result["identity"],))
+        self.assertIn("does not identify", result["scope"])
+
+    def test_descendant_drift_or_unavailable_census_discards_all_attribution(self):
+        for census, after in (
+            ([self.process_snapshot(started="Wed Sep 9 17:00:03 2026")], None),
+            ([{}], None),
+            ([q.QualificationError("unavailable")], None),
+            ([self.process_snapshot()], q.QualificationError("label changed")),
+        ):
+            with self.subTest(census=census, after=after):
+                _fixture, result = self.descendant_fixture(census, after)
+                self.assertFalse(result["available"])
+                self.assertNotIn("descendants", result)
+                self.assertNotIn("identity", result)
+                self.assertNotIn("native_launchctl_child_observed", result)
+
+    def test_descendant_observation_does_not_invent_a_launchctl_child(self):
+        _fixture, result = self.descendant_fixture([self.process_snapshot(command="bash")])
+        self.assertFalse(result["native_launchctl_child_observed"])
+
+    def test_intent_marker_does_not_claim_handler_return(self):
+        directory = self.worker_fixture()
+        bash = subprocess.run(["bash", "-c", "command -v bash"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        capture = "gdm_capture() { :; }\n"
+        # This handler exits between the existing pre-kickstart record and its
+        # return. Intent must survive, while handler completion stays absent.
+        handler = "gdm_handle_wedge() { gdm_record restarted; exit 17; }\n"
+        script = q.watchdog_fixture_script(directory, 700123, q.PREFIX + "mount." + "a" * 32,
+            bash, os.environ["PATH"], capture, handler,
+            watchdog_label=q.PREFIX + "watchdog." + "b" * 32,
+            lease_expires=time.monotonic() + 20)
+        self.assertIn(capture + handler, script)
+        result = subprocess.run([bash, "-c", script], capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual((directory / "restart-intent").read_text(), "restarted\n")
+        self.assertFalse((directory / "handler-returned").exists())
+
     def test_diagnostic_identity_accepts_exec_without_changing_process_lifetime(self):
         evidence, calls = self.diagnostic_fixture([self.process_snapshot(),
             *[self.process_snapshot(command="python3.12")] * 3])
