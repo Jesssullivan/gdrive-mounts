@@ -54,7 +54,9 @@ names the phase.
 2026-08-19T18:04:16Z [gdrive-mounts-sulliwood-root] exec: rclone nfsmount gdrive-sulliwood: …
 ```
 
-Phases, in order: `start`, `guard`, `sweep`, `render`, `exec`. The argv on the
+The dated example shows the legacy phase order. Current Darwin source first
+validates the native mount table, then runs `start`, `guard`, `render`, `exec`;
+it has no stale-mount sweep. Linux retains its FUSE sweep. The argv on the
 `exec` line is the whole rclone command — paths and flags only, never a secret.
 
 ## Darwin recovery boundary
@@ -402,7 +404,7 @@ that does nothing.
 | Code | Who | Meaning |
 |---|---|---|
 | `78` | mount wrapper | Cache guard gave up. The cache volume was not a mountpoint, or the cache directory could not be created there, for the whole `cache.waitSeconds` window (120s by default). The wrapper never falls back to the boot disk. The reason, with the offending path and its mode, is on the `FATAL` line in the `.err.log` and in `<stateDir>/last-error.<org>-root`. |
-| `75` | mount wrapper | The stale-mount sweep failed: something is still mounted at the point after `umount -f`. The wrapper refuses to mount on top of it. The supervisor can retry after its throttle interval. Preserve cache and evidence; do not escalate to a manual force-unmount without a separately approved recovery. See the lifecycle safety boundary below. |
+| `75` | mount wrapper | Current Darwin source refuses an occupied target or an unavailable, empty, malformed or rootless native mount table before writing runtime state. Linux retains its existing stale-FUSE sweep failure. Older Darwin generations can also return 75 after their forced sweep; identify the loaded source before interpreting it. Preserve cache and evidence and apply the lifecycle safety boundary below. |
 | rclone's own | mount wrapper | Anything else is rclone's exit status, forwarded because the wrapper `exec`s it. A handled Unix SIGTERM normally exits 143; SIGQUIT normally exits 2 after dumping goroutines. An exit status alone proves neither non-forcing unmount nor completed uploads. |
 | `0` / `1` / `2` | `just doctor` | All OK / at least one WARN / at least one FAIL. |
 | `2` | any CLI | Usage error. |
@@ -578,9 +580,9 @@ a symptom alone does not authorize replacing a writable mount with unknown uploa
 | agent restart-loops, exits `78`, breadcrumb says `cache volume … does not exist` or `… is not a mountpoint` | cache SSD absent or not mounted at mount time | mount the SSD; the agent waits ~120s then fails loud once — it never spills onto the boot disk |
 | agent restart-loops, exits `78`, breadcrumb says `… is not writable by <user>` and names a mode | the cache subtree is genuinely not writable — a re-formatted or re-plugged volume, or a directory created by another user | the breadcrumb names the exact path and its mode/owner; fix that one directory's ownership, then kickstart the agent. The guard tests the cache subtree, not the volume root, so a root-owned `/Volumes/<name>` is not by itself a fault |
 | reads under the mountpoint hang (`stat` still answers from cache) | dead NFS loopback may remain after rclone exits; a live but wedged server is also possible | preserve cache and reconcile uploads under the lifecycle safety boundary; a responding `stat` does not authorize force-unmount or restart |
-| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | inspect the read-probe and wedge records. Automatic restart depends on confirmed failures, the configured threshold, startup grace and restart floor; no recovery-time guarantee follows. A single flag transition can self-clear. Apply the lifecycle safety boundary before any manual restart |
-| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount may have detached — wedge class 2. In the observed case, NFS server goroutines exited while `mountlib` kept waiting | inspect unit state and the wedge record. Automatic recovery is subject to startup grace, restart floor and cold-start work; it is not guaranteed within a fixed number of seconds. Apply the lifecycle safety boundary before any manual restart |
-| the watchdog restarts a mount repeatedly | recurrence, not a watchdog fault | read the wedge record: a rising `restart_count` with a falling `uptime_sec` is a degrading mount. Check the captures and the network before raising the restart floor |
+| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | inspect the read-probe and wedge records. Current Darwin source records `held-recovery-required` after sustained confirmed failure and preserves the process; older generations can still restart it. A single flag transition can self-clear. Apply the lifecycle safety boundary before recovery |
+| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount may have detached — wedge class 2. In the observed case, NFS server goroutines exited while `mountlib` kept waiting | inspect unit state, source and the wedge record. Current Darwin source holds recovery without signalling the process; disappearance alone does not prove natural exit or authorize a replacement. Apply the lifecycle safety boundary |
+| the Darwin watchdog restarts a mount repeatedly | an older loaded generation still has an automatic recovery executor | identify the loaded source and preserve captures/cache. Current source removes this executor; replacement requires the reviewed graceful handover, not a larger restart floor |
 | plain `umount` says `Resource busy` right after activity | open writers or cached NFS handles may remain | stop the recovery attempt and preserve the current state. Do not replace the failed non-forcing detach with `bootout` or `umount -f`; review the lifecycle safety boundary |
 | slow first `ls` of a big directory | cold VFS dir cache | expected once; the dir-cache TTL keeps it warm after — use the index for search, not `ls`, on a cold mount |
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |
