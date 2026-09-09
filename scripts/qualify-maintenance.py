@@ -38,7 +38,7 @@ LIVE_SECONDS = 5
 HEARTBEAT_MAX_AGE = 3
 COMMAND_TIMEOUT = 5
 LEASE_SECONDS = 240
-FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command")
+FIXTURE_FILES = ("job.plist", "worker.py", "lease.json", "events.jsonl", "heartbeat.json", "heartbeat-next", "command", "startup.err")
 STATE_VALUES = {"running", "waiting", "exited", "not running", "spawn scheduled", "spawn pending"}
 REASON_VALUES = {"none", "crash", "signal", "normal", "exit", "watchdog", "resource"}
 MAX_EVENTS_BYTES = 64 * 1024
@@ -81,7 +81,10 @@ def fixture_plist(label, directory, interpreter, source):
         "ExitTimeOut": 5,
         "EnvironmentVariables": {"PYTHONDONTWRITEBYTECODE": "1"},
         "StandardOutPath": "/dev/null",
-        "StandardErrorPath": "/dev/null",
+        # Interpreter/loader failures occur before worker_event can run. Keep
+        # this owned private stream until diagnostics classify it; never print
+        # raw stderr or inherited environment values in the public receipt.
+        "StandardErrorPath": str(directory / "startup.err"),
     }
 
 
@@ -245,6 +248,26 @@ class Fixture:
                     result["startup_error"]["errno"] = error["errno"]
         except (QualificationError, OSError, ValueError, TypeError, AttributeError):
             result["events_available"] = False
+        try:
+            path = self.directory / "startup.err"
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise OSError("interpreter stderr is not a regular file")
+                raw = stream.read(16385)
+            result["interpreter_stderr"] = {
+                "bytes_observed": len(raw), "truncated": len(raw) > 16384,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "categories": [name for name, marker in (
+                    ("permission-denied", b"Permission denied"),
+                    ("missing-file", b"No such file or directory"),
+                    ("loader-error", b"dyld"),
+                    ("python-traceback", b"Traceback (most recent call last)"),
+                    ("import-error", b"ModuleNotFoundError"),
+                ) if marker in raw],
+            }
+        except OSError:
+            result["interpreter_stderr"] = {"available": False}
         return result
 
     def heartbeat(self, pid):

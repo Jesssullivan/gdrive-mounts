@@ -389,6 +389,23 @@ let
     }
   '';
 
+  # Executed before state/cache creation, log rotation, RC socket removal and
+  # config rendering. A mounted path is not proof of an abandoned server, and
+  # failed native observation is not proof of an empty mount table.
+  darwinStartupAdmission = ''
+    # BEGIN Darwin existing mount admission
+    if ! gdm_mount_table="$(mount)"; then
+      printf 'FATAL gdrive-mounts %s: mount table unavailable; startup held\n' "$unit" >&2
+      exit 75
+    fi
+    if printf '%s\n' "$gdm_mount_table" | grep -qF " on $point ("; then
+      printf 'FATAL gdrive-mounts %s: existing mount preserved; reviewed non-forcing recovery required\n' "$unit" >&2
+      exit 75
+    fi
+    unset gdm_mount_table
+    # END Darwin existing mount admission
+  '';
+
   # The cache-volume guard: a bounded wait, then one loud, distinguishable exit.
   #
   # Reads `$unit`, `$cache`, `$volume`, `$err`; needs shellPreamble sourced
@@ -485,6 +502,7 @@ let
       unitActiveCheck, # rc 0 when the mount unit is loaded/active
       unitPidCommand, # prints the mount unit's pid, or nothing
       restartCommand, # restarts the mount unit
+      allowForcedRecovery ? true, # false on Darwin; no signal/restart executor
     }:
     let
       # The AND arm, emitted only where a kernel-side signal exists to AND with.
@@ -514,6 +532,7 @@ let
       consecutive=0
       cycles=0
       seen_mounted=0
+      recovery_hold_reported=0
       gdm_probe_flags=""
       gdm_probe_fs_result=""
 
@@ -689,7 +708,7 @@ let
         pid="''${1:-}"
         {
           printf '=== %s %s wedge capture (pid %s) ===\n' "$(gdm_now)" "$unit" "''${pid:-none}"
-          printf 'note: the SIGQUIT traceback in the unit err log is INDUCED BY THIS WATCHDOG (not a crash)\n'
+          ${if allowForcedRecovery then ''printf 'note: the SIGQUIT traceback in the unit err log is INDUCED BY THIS WATCHDOG (not a crash)\n' '' else ''printf 'note: diagnostic capture only; mount process and buffered writes are preserved\n' ''}
           printf 'probe: flags=%s fs=%s consecutive=%s\n' \
             "''${gdm_probe_flags:-none}" "''${gdm_probe_fs_result:-none}" "$consecutive"
           ${if nfsStatus then "nfsstat -m 2>&1 || true" else "true"}
@@ -713,6 +732,7 @@ let
         } >> "$capture" 2>&1
         chmod 600 "$capture" 2>/dev/null || true
 
+        ${lib.optionalString allowForcedRecovery ''
         if [ -n "$pid" ]; then
           gdm_log "wedge: SIGQUIT $pid — induced traceback (not a crash); the goroutine dump goes to the unit err log"
           kill -QUIT "$pid" 2>/dev/null || true
@@ -720,6 +740,7 @@ let
         else
           gdm_log "wedge: no pid to signal — skipping the induced traceback"
         fi
+        ''}
       }
 
       # Append-only, one JSON object per line, 0600. `restart_count` is derived
@@ -766,6 +787,20 @@ let
         pid="$(${unitPidCommand})"
         uptime="$(gdm_pid_uptime "''${pid:-}" || printf unknown)"
 
+        ${lib.optionalString (!allowForcedRecovery) ''
+        # One capture per observed unhealthy episode. No late action exists
+        # after an in-flight diagnostic request: timeout or changing supervisor
+        # state can never turn this read-only path into a signal or restart.
+        if [ "$recovery_hold_reported" = 0 ]; then
+          recovery_hold_reported=1
+          gdm_record held-recovery-required "$pid" "$uptime"
+          gdm_log "wedge: recovery required — preserving the mount process and buffered writes"
+          gdm_capture "$pid"
+        fi
+        return 0
+        ''}
+
+        ${lib.optionalString allowForcedRecovery ''
         if gdm_floor_blocks; then
           gdm_log "wedge: holding — the last restart is inside the ''${restart_floor}s floor"
           gdm_record held-by-floor "$pid" "$uptime"
@@ -791,6 +826,7 @@ let
         # held-by-floor line every interval, into a record this repo never
         # rotates, and a pointless SIGQUIT+kickstart every floor period.
         seen_mounted=0
+        ''}
       }
 
       gdm_note_failure() {
@@ -809,6 +845,7 @@ let
         if ! ${unitActiveCheck}; then
           gdm_log "probe: the mount unit is not loaded — standing down"
           consecutive=0
+          recovery_hold_reported=0
           return 0
         fi
 
@@ -854,6 +891,7 @@ let
             gdm_log "probe: recovered after $consecutive consecutive failure(s)"
           fi
           consecutive=0
+          recovery_hold_reported=0
           cycles=$((cycles + 1))
           if [ "$((cycles % heartbeat_every))" -eq 0 ]; then
             gdm_log "probe: healthy ($cycles cycles)"

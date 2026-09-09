@@ -431,6 +431,23 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual(evidence["startup_error"], {"category": "unrecognized", "errno": 13})
         self.assertNotIn("PRIVATE", json.dumps(evidence))
 
+    def test_interpreter_stderr_retains_bounded_categories_without_raw_values(self):
+        directory = self.worker_fixture()
+        path = directory / "startup.err"
+        path.write_bytes(b"PRIVATE_TOKEN Permission denied\n" + b"x" * 20000)
+        fixture = q.Fixture(directory, q.PREFIX + "test")
+        evidence = fixture.startup_diagnostics()["interpreter_stderr"]
+        self.assertEqual(evidence["categories"], ["permission-denied"])
+        self.assertEqual(evidence["bytes_observed"], 16385)
+        self.assertTrue(evidence["truncated"])
+        self.assertNotIn("PRIVATE_TOKEN", json.dumps(evidence))
+        path.unlink()
+        path.symlink_to(directory / "lease.json")
+        self.assertEqual(fixture.startup_diagnostics()["interpreter_stderr"], {"available": False})
+        path.unlink()
+        os.mkfifo(path)
+        self.assertEqual(fixture.startup_diagnostics()["interpreter_stderr"], {"available": False})
+
 
 if __name__ == "__main__":
     unittest.main()

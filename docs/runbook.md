@@ -57,7 +57,36 @@ names the phase.
 Phases, in order: `start`, `guard`, `sweep`, `render`, `exec`. The argv on the
 `exec` line is the whole rclone command — paths and flags only, never a secret.
 
-## The wedge, and the watchdog that clears it
+## Darwin recovery boundary
+
+The current source holds Darwin startup when the native mount table is
+unavailable or the target is occupied. It does so before cache creation, log
+rotation, RC socket removal or configuration rendering. It never infers that an
+existing mount is abandoned and never force-detaches it.
+
+The Darwin watchdog preserves the serving process and buffered writes. A
+confirmed unhealthy episode produces one `held-recovery-required` record and
+one diagnostic capture; it does not send SIGQUIT, invoke `kickstart -k`, or
+claim a completed restart. A diagnostic request that finishes after supervisor
+state changes has no late recovery action. Linux's existing FUSE path is
+unchanged. Source promotion does not retrofit this policy into loaded services.
+
+This removes destructive recovery, but does not certify soft reattachment.
+The supported foreground NFS route is an explicit non-forcing `umount` with
+writers paused, cache/config preserved and supervision already controlled,
+followed by observed natural exit of the original rclone process. A refused or
+unanswered RC query never proves uploads drained. Busy detach, timeout, missing
+natural exit or uncertain supervisor ownership stops the attempt; there is no
+signal or force fallback. Only after these gates may the reviewed replacement
+start, and its new source, process, mount, RC queue and selected readback must
+be observed. The lifecycle safety boundary below applies to the installed old
+watchdog until a separately authorized handover replaces it.
+
+## Historical wedge diagnosis and legacy automatic restart
+
+The mechanism described in this historical section is the pre-September-9
+Darwin implementation. Its automatic signal/restart executor has been removed
+from current Darwin source; it can still be present in an older live generation.
 
 > **2026-09-05 — the restart loop, and what it actually was.** neo restarted
 > `sulliwood-root` **606 times** between 2026-08-22 and 2026-09-05, one every
@@ -405,7 +434,7 @@ and [NFS backend](https://github.com/rclone/rclone/blob/v1.75.0/cmd/nfsmount/nfs
 VFS shutdown cancels background work; it is not a successful upload-drain
 receipt. [Pinned VFS shutdown](https://github.com/rclone/rclone/blob/v1.75.0/vfs/vfs.go#L359-L395).
 
-The repository adds another independent hazard: watchdog capture tolerates
+The older deployed repository adds another independent hazard: watchdog capture tolerates
 failed RC queries, then sends SIGQUIT and requests a forced restart. Startup
 force-unmounts an existing mount before launching its replacement. Stopping a
 loaded mount does not make the watchdog stand down, and an already-running
