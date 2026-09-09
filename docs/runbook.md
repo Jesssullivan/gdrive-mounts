@@ -54,10 +54,41 @@ names the phase.
 2026-08-19T18:04:16Z [gdrive-mounts-sulliwood-root] exec: rclone nfsmount gdrive-sulliwood: …
 ```
 
-Phases, in order: `start`, `guard`, `sweep`, `render`, `exec`. The argv on the
+The dated example shows the legacy phase order. Current Darwin source first
+validates the native mount table, then runs `start`, `guard`, `render`, `exec`;
+it has no stale-mount sweep. Linux retains its FUSE sweep. The argv on the
 `exec` line is the whole rclone command — paths and flags only, never a secret.
 
-## The wedge, and the watchdog that clears it
+## Darwin recovery boundary
+
+The current source holds Darwin startup when the native mount table is
+unavailable or the target is occupied. It does so before cache creation, log
+rotation, RC socket removal or configuration rendering. It never infers that an
+existing mount is abandoned and never force-detaches it.
+
+The Darwin watchdog preserves the serving process and buffered writes. A
+confirmed unhealthy episode produces one `held-recovery-required` record and
+one diagnostic capture; it does not send SIGQUIT, invoke `kickstart -k`, or
+claim a completed restart. A diagnostic request that finishes after supervisor
+state changes has no late recovery action. Linux's existing FUSE path is
+unchanged. Source promotion does not retrofit this policy into loaded services.
+
+This removes destructive recovery, but does not certify soft reattachment.
+The supported foreground NFS route is an explicit non-forcing `umount` with
+writers paused, cache/config preserved and supervision already controlled,
+followed by observed natural exit of the original rclone process. A refused or
+unanswered RC query never proves uploads drained. Busy detach, timeout, missing
+natural exit or uncertain supervisor ownership stops the attempt; there is no
+signal or force fallback. Only after these gates may the reviewed replacement
+start, and its new source, process, mount, RC queue and selected readback must
+be observed. The lifecycle safety boundary below applies to the installed old
+watchdog until a separately authorized handover replaces it.
+
+## Historical wedge diagnosis and legacy automatic restart
+
+The mechanism described in this historical section is the pre-September-9
+Darwin implementation. Its automatic signal/restart executor has been removed
+from current Darwin source; it can still be present in an older live generation.
 
 > **2026-09-05 — the restart loop, and what it actually was.** neo restarted
 > `sulliwood-root` **606 times** between 2026-08-22 and 2026-09-05, one every
@@ -373,7 +404,7 @@ that does nothing.
 | Code | Who | Meaning |
 |---|---|---|
 | `78` | mount wrapper | Cache guard gave up. The cache volume was not a mountpoint, or the cache directory could not be created there, for the whole `cache.waitSeconds` window (120s by default). The wrapper never falls back to the boot disk. The reason, with the offending path and its mode, is on the `FATAL` line in the `.err.log` and in `<stateDir>/last-error.<org>-root`. |
-| `75` | mount wrapper | The stale-mount sweep failed: something is still mounted at the point after `umount -f`. The wrapper refuses to mount on top of it. The supervisor can retry after its throttle interval. Preserve cache and evidence; do not escalate to a manual force-unmount without a separately approved recovery. See the lifecycle safety boundary below. |
+| `75` | mount wrapper | Current Darwin source refuses an occupied target or an unavailable, empty, malformed or rootless native mount table before writing runtime state. Linux retains its existing stale-FUSE sweep failure. Older Darwin generations can also return 75 after their forced sweep; identify the loaded source before interpreting it. Preserve cache and evidence and apply the lifecycle safety boundary below. |
 | rclone's own | mount wrapper | Anything else is rclone's exit status, forwarded because the wrapper `exec`s it. A handled Unix SIGTERM normally exits 143; SIGQUIT normally exits 2 after dumping goroutines. An exit status alone proves neither non-forcing unmount nor completed uploads. |
 | `0` / `1` / `2` | `just doctor` | All OK / at least one WARN / at least one FAIL. |
 | `2` | any CLI | Usage error. |
@@ -405,7 +436,7 @@ and [NFS backend](https://github.com/rclone/rclone/blob/v1.75.0/cmd/nfsmount/nfs
 VFS shutdown cancels background work; it is not a successful upload-drain
 receipt. [Pinned VFS shutdown](https://github.com/rclone/rclone/blob/v1.75.0/vfs/vfs.go#L359-L395).
 
-The repository adds another independent hazard: watchdog capture tolerates
+The older deployed repository adds another independent hazard: watchdog capture tolerates
 failed RC queries, then sends SIGQUIT and requests a forced restart. Startup
 force-unmounts an existing mount before launching its replacement. Stopping a
 loaded mount does not make the watchdog stand down, and an already-running
@@ -444,6 +475,31 @@ does not establish whether disabling suppresses restart.
 It does not stop, inspect or recover the real mount and does not prove upload
 drainage or the separate watchdog's `KeepAlive = true` behavior. A failed or
 inconclusive result blocks recovery.
+
+`--startup-only` selects a separate diagnostic experiment and performs no restart
+or disable control. A native shell writes a pre-interpreter marker, then Python
+runs with `-I -B` and records entry before loading the controller. On failure,
+the tool captures the still-live owned PID and start identity, bounded native
+stack frames and cwd when available, then cleans up its fixture. These markers
+distinguish shell/exec, interpreter initialization and controller/worker startup.
+Unavailable observations remain unavailable; this mode does not qualify recovery.
+
+A native Neo 26.7 observation on 2026-09-09 reached the disabled control and
+observed a replacement PID after exit 42 despite successful `launchctl disable`.
+The fixture cleaned up; disabling a loaded job is not an accepted restart barrier.
+
+The alternative `--legacy-watchdog-script /nix/store/<inspected-watchdog-script>`
+sequence accepts only the exact reviewed installed watchdog bytes. It runs the
+original capture and restart handler against random owned worker labels, with
+inert NFS observations and a private RC stand-in. A positive control must deliver
+SIGQUIT and a native restart to the disposable worker. The handover control then
+boots out the unconditional watchdog during an observed RC child, verifies native
+PID/parent/process-group/start identities and descendant termination, and checks
+that no late signal or restart reaches the separate worker. Finally it qualifies
+exit zero without respawn beyond the throttle window and a fresh replacement
+start. It uses native default exit timeout and process-group behavior. This is a
+supervision experiment: its clean-exit marker does not prove that real rclone
+receives an NFS unmount callback, completes uploads, or exits successfully.
 
 The fixture removes only its own known files and unloads its random service.
 An uncertain cleanup preserves the exact directory and reports it. Clearing its
@@ -549,9 +605,9 @@ a symptom alone does not authorize replacing a writable mount with unknown uploa
 | agent restart-loops, exits `78`, breadcrumb says `cache volume … does not exist` or `… is not a mountpoint` | cache SSD absent or not mounted at mount time | mount the SSD; the agent waits ~120s then fails loud once — it never spills onto the boot disk |
 | agent restart-loops, exits `78`, breadcrumb says `… is not writable by <user>` and names a mode | the cache subtree is genuinely not writable — a re-formatted or re-plugged volume, or a directory created by another user | the breadcrumb names the exact path and its mode/owner; fix that one directory's ownership, then kickstart the agent. The guard tests the cache subtree, not the volume root, so a root-owned `/Volumes/<name>` is not by itself a fault |
 | reads under the mountpoint hang (`stat` still answers from cache) | dead NFS loopback may remain after rclone exits; a live but wedged server is also possible | preserve cache and reconcile uploads under the lifecycle safety boundary; a responding `stat` does not authorize force-unmount or restart |
-| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | inspect the read-probe and wedge records. Automatic restart depends on confirmed failures, the configured threshold, startup grace and restart floor; no recovery-time guarantee follows. A single flag transition can self-clear. Apply the lifecycle safety boundary before any manual restart |
-| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount may have detached — wedge class 2. In the observed case, NFS server goroutines exited while `mountlib` kept waiting | inspect unit state and the wedge record. Automatic recovery is subject to startup grace, restart floor and cold-start work; it is not guaranteed within a fixed number of seconds. Apply the lifecycle safety boundary before any manual restart |
-| the watchdog restarts a mount repeatedly | recurrence, not a watchdog fault | read the wedge record: a rising `restart_count` with a falling `uptime_sec` is a degrading mount. Check the captures and the network before raising the restart floor |
+| `nfsstat -m` says `not responding`, rclone is alive, nothing is logged | the mount stopped answering — wedge class 1 | inspect the read-probe and wedge records. Current Darwin source records `held-recovery-required` after sustained confirmed failure and preserves the process; older generations can still restart it. A single flag transition can self-clear. Apply the lifecycle safety boundary before recovery |
+| `mount` shows nothing at the point, rclone is alive and old, nothing is logged | the mount may have detached — wedge class 2. In the observed case, NFS server goroutines exited while `mountlib` kept waiting | inspect unit state, source and the wedge record. Current Darwin source holds recovery without signalling the process; disappearance alone does not prove natural exit or authorize a replacement. Apply the lifecycle safety boundary |
+| the Darwin watchdog restarts a mount repeatedly | an older loaded generation still has an automatic recovery executor | identify the loaded source and preserve captures/cache. Current source removes this executor; replacement requires the reviewed graceful handover, not a larger restart floor |
 | plain `umount` says `Resource busy` right after activity | open writers or cached NFS handles may remain | stop the recovery attempt and preserve the current state. Do not replace the failed non-forcing detach with `bootout` or `umount -f`; review the lifecycle safety boundary |
 | slow first `ls` of a big directory | cold VFS dir cache | expected once; the dir-cache TTL keeps it warm after — use the index for search, not `ls`, on a cold mount |
 | `403 rateLimit` errors | per-org Drive API quota | each org has its own client_id, which isolates this; back off the index interval if it recurs |

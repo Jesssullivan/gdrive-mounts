@@ -105,6 +105,13 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(all(call[1] == fixture.target for call in fixture.calls[1:]))
         self.assertNotIn("-k", [arg for call in fixture.calls for arg in call])
 
+    def test_startup_only_does_not_issue_restart_or_disable_controls(self):
+        fixture = SimulatedFixture()
+        result = fixture.qualify_startup()
+        self.assertTrue(result["startup_ready"])
+        self.assertEqual([call[0] for call in fixture.calls], ["bootstrap"])
+        self.assertIn("startup diagnostic only", result["scope"])
+
     def test_failure_paths_cannot_pass(self):
         for behavior in ("signal-on-disable", "stop-on-disable", "stalled-heartbeat",
                          "disable-ignored", "unsupported", "no-positive-restart",
@@ -140,6 +147,15 @@ class QualificationTests(unittest.TestCase):
                 fixture.cleanup()
         remove.assert_not_called()
 
+    def test_uncertain_descendant_census_still_unloads_but_preserves_files(self):
+        fixture = SimulatedFixture()
+        fixture.qualify()
+        with patch.object(q, "pid_alive", return_value=False), patch.object(q, "remove_fixture_files") as remove:
+            fixture.cleanup(preserve_files=True)
+        self.assertFalse(fixture.loaded)
+        self.assertIn(("bootout", fixture.target), fixture.calls)
+        remove.assert_not_called()
+
     def test_cleanup_checks_observed_pid_without_heartbeat_or_start_event(self):
         for observed_before_cleanup in (False, True):
             with self.subTest(observed_before_cleanup=observed_before_cleanup):
@@ -159,6 +175,51 @@ class QualificationTests(unittest.TestCase):
                 self.assertIn(70454, fixture.known_pids)
                 alive.assert_called_with(70454)
                 remove.assert_not_called()
+
+    def test_capture_child_and_timeout_parent_must_drain_before_cleanup(self):
+        fixture = SimulatedFixture()
+        fixture.touched = True
+        fixture.records = [{"event": "capture-start", "pid": 70457, "ppid": 70458, "pgid": 70458}]
+        with patch.object(q, "pid_alive", side_effect=lambda pid: pid == 70458), \
+                patch.object(q, "remove_fixture_files") as remove:
+            with self.assertRaisesRegex(q.QualificationError, "PID still exists"):
+                fixture.cleanup()
+        self.assertEqual(fixture.known_pids, {70457, 70458})
+        remove.assert_not_called()
+
+    def test_handover_refuses_uninspected_script_before_creating_fixture(self):
+        with patch.object(q.tempfile, "mkdtemp") as mkdir, patch.object(q.subprocess, "run") as run:
+            with self.assertRaises(q.QualificationError):
+                q.qualify_watchdog_handover(Path("/unused"), "/untrusted/watchdog.sh")
+        mkdir.assert_not_called()
+        run.assert_not_called()
+
+    def test_handover_cannot_address_a_real_service(self):
+        for label in ("dev.tinyland.gdrive-mounts.sulliwood-root", q.PREFIX + "mount.not-random", "bad;command"):
+            with self.subTest(label=label), self.assertRaises(q.QualificationError):
+                q.watchdog_fixture_script(Path("/unused"), 42, label, "/bin/bash", "/bin", "", "")
+
+    def test_descendant_custody_includes_timeout_separate_process_group(self):
+        processes = {42: {"ppid": 1, "pgid": 42}, 43: {"ppid": 42, "pgid": 43},
+                     44: {"ppid": 43, "pgid": 43}, 99: {"ppid": 1, "pgid": 99}}
+        self.assertEqual(set(q.owned_descendants(processes, 42)), {42, 43, 44})
+        with self.assertRaises(q.QualificationError):
+            q.owned_descendants(processes, 50)
+
+    def test_census_timeout_becomes_structured_qualification_failure(self):
+        with patch.object(q.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", q.COMMAND_TIMEOUT)):
+            with self.assertRaisesRegex(q.QualificationError, "descendant custody unavailable"):
+                q.native_process_snapshot()
+
+    def test_watchdog_abandonment_lease_refuses_unknown_label_or_expired_deadline(self):
+        mount = q.PREFIX + "mount." + "a" * 32
+        watchdog = q.PREFIX + "watchdog." + "b" * 32
+        for label, expiry in (("real-watchdog", time.monotonic() + 10),
+                              (watchdog, time.monotonic() - 1),
+                              (watchdog, time.monotonic() + q.LEASE_SECONDS + 10)):
+            with self.subTest(label=label, expiry=expiry), self.assertRaises(q.QualificationError):
+                q.watchdog_fixture_script(Path("/unused"), 42, mount, "/bin/bash", "/bin", "", "",
+                                          watchdog_label=label, lease_expires=expiry)
 
     def test_cleanup_tracks_pid_first_seen_while_waiting_for_unload(self):
         fixture = SimulatedFixture()
@@ -226,7 +287,10 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(item["ProcessType"], "Background")
         self.assertTrue(item["RunAtLoad"])
         self.assertEqual(item["ThrottleInterval"], 30)
-        self.assertEqual(item["ProgramArguments"], ["/python", str(SOURCE), "--fixture-child", "/private-fixture"])
+        self.assertEqual(item["ProgramArguments"][:2], ["/bin/sh", "-c"])
+        self.assertIn("exec /python -I -B -c", item["ProgramArguments"][2])
+        self.assertIn("pre-interpreter", item["ProgramArguments"][2])
+        self.assertEqual(item["StandardOutPath"], "/private-fixture/pre-interpreter.jsonl")
         self.assertNotIn("rclone", json.dumps(item))
 
     def test_launchctl_only_accepts_exact_missing_service_error(self):
@@ -355,7 +419,134 @@ class PrivateFileTests(unittest.TestCase):
         (directory / "lease.json").write_text(json.dumps({"expires": time.monotonic() + 20}))
         return directory
 
+    def diagnostic_fixture(self, snapshots, label_pids=None):
+        fixture = q.Fixture(self.worker_fixture(), q.PREFIX + "mount." + "a" * 32)
+        fixture.touched = True
+        label_pids = label_pids or [700123] * 8
+        outputs = [f"pid = {pid}\n" if pid is not None else "state = exited\n" for pid in label_pids]
+        fixture.launchctl = Mock(side_effect=outputs)
+        calls = []
+
+        def probe(command, **_kwargs):
+            calls.append(command)
+            if command[0] == "/usr/bin/sample":
+                (fixture.directory / "startup.sample").write_text("  + 1 owned_sample_frame\n")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            self.assertEqual(command[0], "/usr/sbin/lsof")
+            return subprocess.CompletedProcess(command, 0, "p700123\nn/owned-fixture-cwd\n", "")
+
+        with patch.object(q.platform, "system", return_value="Darwin"), \
+                patch.object(q, "native_process_snapshot", side_effect=snapshots), \
+                patch.object(q.subprocess, "run", side_effect=probe):
+            evidence = fixture.startup_diagnostics()
+        self.assertTrue(all(call.args == ("print", fixture.target) and call.kwargs == {"missing_ok": True}
+                            for call in fixture.launchctl.call_args_list))
+        return evidence, calls
+
+    def process_snapshot(self, started="Wed Sep 9 17:00:00 2026", command="sh"):
+        return {700123: {"ppid": 1, "pgid": 700123, "started": started, "command": command}}
+
+    def test_diagnostic_identity_accepts_exec_without_changing_process_lifetime(self):
+        evidence, calls = self.diagnostic_fixture([self.process_snapshot(),
+            *[self.process_snapshot(command="python3.12")] * 3])
+        self.assertEqual([call[0] for call in calls], ["/usr/bin/sample", "/usr/sbin/lsof"])
+        self.assertEqual(evidence["native_sample"]["frames"], ["+ 1 owned_sample_frame"])
+        self.assertTrue(evidence["native_sample"]["identity_verified"])
+        self.assertEqual(evidence["cwd"], ["/owned-fixture-cwd"])
+        self.assertTrue(evidence["cwd_identity_verified"])
+        self.assertNotIn("live_attribution", evidence)
+        self.assertEqual(set(evidence["live_process"]), {"pid", "started"})
+
+    def test_sample_lost_identity_discards_frames_and_never_probes_cwd(self):
+        cases = (
+            ([self.process_snapshot(), self.process_snapshot(started="Wed Sep 9 17:00:01 2026")], None),
+            ([self.process_snapshot(), {}], None),
+            ([self.process_snapshot()], [700123, 700123, 700124]),
+            ([self.process_snapshot(), self.process_snapshot()], [700123, 700123, 700123, 700124]),
+            ([self.process_snapshot(), q.QualificationError("census unavailable")], None),
+        )
+        for snapshots, label_pids in cases:
+            with self.subTest(snapshots=snapshots, label_pids=label_pids):
+                evidence, calls = self.diagnostic_fixture(snapshots, label_pids)
+                self.assertEqual([call[0] for call in calls], ["/usr/bin/sample"])
+                self.assertFalse(evidence["native_sample"]["available"])
+                self.assertFalse(evidence["cwd"]["available"])
+                self.assertNotIn("owned_sample_frame", json.dumps(evidence))
+                self.assertNotIn("cwd_probe_exit", evidence)
+
+    def test_identity_change_before_cwd_skips_numeric_pid_probe(self):
+        evidence, calls = self.diagnostic_fixture([self.process_snapshot()] * 3,
+                                                  [700123] * 4 + [700124, 700124])
+        self.assertEqual([call[0] for call in calls], ["/usr/bin/sample"])
+        self.assertTrue(evidence["native_sample"]["identity_verified"])
+        self.assertFalse(evidence["cwd"]["available"])
+        self.assertNotIn("cwd_probe_exit", evidence)
+
+    def test_identity_change_during_cwd_discards_its_output(self):
+        for snapshots, label_pids in (
+            ([self.process_snapshot()] * 3 + [self.process_snapshot(started="Wed Sep 9 17:00:01 2026")], None),
+            ([self.process_snapshot()] * 4, [700123] * 7 + [700124]),
+        ):
+            with self.subTest(label_pids=label_pids):
+                evidence, calls = self.diagnostic_fixture(snapshots, label_pids)
+                self.assertEqual([call[0] for call in calls], ["/usr/bin/sample", "/usr/sbin/lsof"])
+                self.assertTrue(evidence["native_sample"]["identity_verified"])
+                self.assertFalse(evidence["cwd"]["available"])
+                self.assertNotIn("/owned-fixture-cwd", json.dumps(evidence))
+                self.assertNotIn("cwd_probe_exit", evidence)
+                self.assertNotIn("cwd_identity_verified", evidence)
+
+    def test_unowned_diagnostic_target_refuses_before_native_observation(self):
+        for label, touched, changed_target in ((q.PREFIX + "test", True, False),
+                ("dev.tinyland.gdrive-mounts.sulliwood-root", True, False),
+                (q.PREFIX + "a" * 32, False, False), (q.PREFIX + "a" * 32, True, True)):
+            with self.subTest(label=label, touched=touched, changed_target=changed_target):
+                fixture = q.Fixture(self.worker_fixture(), label)
+                fixture.touched = touched
+                if changed_target:
+                    fixture.target = "gui/501/dev.tinyland.gdrive-mounts.sulliwood-root"
+                fixture.launchctl = Mock()
+                with patch.object(q, "native_process_snapshot") as snapshot:
+                    with self.assertRaises(q.QualificationError):
+                        fixture.diagnostic_identity()
+                fixture.launchctl.assert_not_called()
+                snapshot.assert_not_called()
+
     def test_worker_runs_in_ordinary_subprocess_and_writes_real_heartbeat(self):
+        self.run_worker(42)
+
+    def test_clean_exit_worker_returns_zero_with_matching_exit_record(self):
+        self.run_worker(0)
+
+    def test_bootstrap_records_both_entries_and_ignores_pythonpath_customization(self):
+        directory = self.worker_fixture()
+        injection = self.parent / "sitecustomize.py"
+        marker = self.parent / "unexpected-site-hook"
+        injection.write_text("from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n")
+        # Linux uses the real worker body through a tiny test wrapper because
+        # the public Darwin guard remains intact. The launchd bootstrap itself
+        # is identical on both platforms and executes in a real subprocess.
+        worker = SOURCE.resolve()
+        if q.platform.system() != "Darwin":
+            worker = directory / "worker.py"
+            worker.write_text("import importlib.util,sys\n"
+                              "s=importlib.util.spec_from_file_location('q'," + repr(str(SOURCE.resolve())) + ")\n"
+                              "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
+                              "sys.exit(m._worker(sys.argv[2]))\n")
+        item = q.fixture_plist(q.PREFIX + "test", directory, sys.executable, worker)
+        env = {**os.environ, "PYTHONPATH": str(self.parent), "PYTHONDONTWRITEBYTECODE": "1"}
+        with subprocess.Popen(item["ProgramArguments"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=env) as process:
+            (directory / "command").write_text(f"exit-0:{process.pid}")
+            stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(json.loads(stdout), {"phase": "pre-interpreter", "pid": process.pid})
+        self.assertEqual(json.loads((directory / "python-entry.json").read_text()),
+                         {"phase": "python-entry", "pid": process.pid})
+        self.assertFalse(marker.exists())
+        self.assertTrue(q.Fixture(directory, q.PREFIX + "test").heartbeat(process.pid))
+
+    def run_worker(self, exit_code):
         directory = self.worker_fixture()
         if q.platform.system() == "Darwin":
             # Exercise the exact public child argv on its supported platform.
@@ -372,9 +563,9 @@ class PrivateFileTests(unittest.TestCase):
         environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, env=environment) as process:
-            (directory / "command").write_text(f"exit-42:{process.pid}")
+            (directory / "command").write_text(f"exit-{exit_code}:{process.pid}")
             stdout, stderr = process.communicate(timeout=5)
-        self.assertEqual(process.returncode, 42, stderr)
+        self.assertEqual(process.returncode, exit_code, stderr)
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")
         fixture = q.Fixture(directory, q.PREFIX + "test")
@@ -382,7 +573,7 @@ class PrivateFileTests(unittest.TestCase):
         self.assertEqual([row["event"] for row in events], ["child-startup", "start", "exit"])
         self.assertTrue(all(row["pid"] == process.pid for row in events))
         self.assertTrue(fixture.heartbeat(process.pid))
-        self.assertEqual(events[-1]["code"], 42)
+        self.assertEqual(events[-1]["code"], exit_code)
         self.assertEqual((directory / "events.jsonl").stat().st_mode & 0o777, 0o600)
         self.assertEqual((directory / "heartbeat.json").stat().st_mode & 0o777, 0o600)
 
@@ -430,6 +621,23 @@ class PrivateFileTests(unittest.TestCase):
         evidence = fixture.startup_diagnostics()
         self.assertEqual(evidence["startup_error"], {"category": "unrecognized", "errno": 13})
         self.assertNotIn("PRIVATE", json.dumps(evidence))
+
+    def test_interpreter_stderr_retains_bounded_categories_without_raw_values(self):
+        directory = self.worker_fixture()
+        path = directory / "startup.err"
+        path.write_bytes(b"PRIVATE_TOKEN Permission denied\n" + b"x" * 20000)
+        fixture = q.Fixture(directory, q.PREFIX + "test")
+        evidence = fixture.startup_diagnostics()["interpreter_stderr"]
+        self.assertEqual(evidence["categories"], ["permission-denied"])
+        self.assertEqual(evidence["bytes_observed"], 16385)
+        self.assertTrue(evidence["truncated"])
+        self.assertNotIn("PRIVATE_TOKEN", json.dumps(evidence))
+        path.unlink()
+        path.symlink_to(directory / "lease.json")
+        self.assertEqual(fixture.startup_diagnostics()["interpreter_stderr"], {"available": False})
+        path.unlink()
+        os.mkfifo(path)
+        self.assertEqual(fixture.startup_diagnostics()["interpreter_stderr"], {"available": False})
 
 
 if __name__ == "__main__":

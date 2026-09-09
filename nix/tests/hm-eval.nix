@@ -332,6 +332,7 @@ let
   watchdogTextFor =
     nfsStatus:
     plan.watchdogShell {
+      allowForcedRecovery = !nfsStatus;
       intervalSec = 60;
       probeTimeoutSec = 10;
       failureThreshold = 2;
@@ -362,6 +363,7 @@ let
       # harness point is not an NFS mount, so the flag reads empty/healthy —
       # which is exactly the condition the AND arm exists to sit out.
       nfsStatus ? false,
+      allowForcedRecovery ? true,
     }:
     pkgs.writeShellScript "gdrive-mounts-watchdog-harness" ''
       set -euo pipefail
@@ -386,6 +388,7 @@ let
           mountGraceSec
           ;
         inherit nfsStatus;
+        inherit allowForcedRecovery;
         mountedCheck = ''[ -f "$state/mounted" ]'';
         unitActiveCheck = ''[ -f "$state/active" ]'';
         unitPidCommand = ''cat "$state/pid" 2>/dev/null || true'';
@@ -1097,14 +1100,22 @@ let
       # one. 443 of them on neo against zero SIGSEGV, SIGBUS, panic or fatal
       # error in 208,067 lines. The watchdog induces every one, so the watchdog
       # is where it has to be labelled.
-      name = "the-induced-traceback-is-labelled-as-such";
+      name = "darwin-preserves-the-mount-and-linux-labels-induced-tracebacks";
       ok =
         let
-          w = watchdogTextFor true;
+          w = watchdogTextFor false;
         in
         hasInfix "induced traceback (not a crash)" w
         && hasInfix "INDUCED BY THIS WATCHDOG (not a crash)" w
         && hasInfix "kill -QUIT" w;
+    }
+    {
+      name = "darwin-has-no-signal-or-restart-executor-even-after-capture";
+      ok =
+        let w = watchdogTextFor true;
+        in !(hasInfix "kill -QUIT" w)
+          && !(hasInfix ''gdm_record restarted'' w)
+          && hasInfix ''gdm_record held-recovery-required'' w;
     }
     {
       # The ratified supervision constants, asserted on the registry an operator
@@ -1157,7 +1168,7 @@ let
       name = "the-restart-floor-is-read-from-disk-not-from-a-variable";
       ok =
         let
-          w = watchdogTextFor true;
+          w = watchdogTextFor false;
         in
         hasInfix ''[ -f "$floor_file" ] || return 1'' w && hasInfix ''gdm_epoch > "$floor_file"'' w;
     }
@@ -1169,7 +1180,8 @@ if failures != [ ] then
   throw "hm-eval failed: ${lib.concatStringsSep ", " failures}"
 else
   pkgs.runCommand "gdrive-mounts-hm-eval" { } ''
-    set -eu
+    set -Eeu
+    trap 'rc=$?; if [[ $- == *e* ]]; then printf "hm-eval: line %s failed: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; fi' ERR
 
     # Every negative assertion in this builder goes through `no`, because the
     # obvious spelling does not work: bash exempts a pipeline whose exit status
@@ -1244,8 +1256,8 @@ else
     no grep -q 'GDM_RWLAB' "$dsul"
 
     # C6 — bounded wait then a loud, distinguishable exit.
-    grep -qF 'mount | grep -qF " on ' "$dsul"
-    grep -q 'umount -f' "$dsul"
+    grep -qF 'gdm_mount_table="$(mount)"' "$dsul"
+    no grep -q 'umount -f' "$dsul"
     grep -q 'mountpoint -q' "$lsul"
     grep -q 'exit 78' "$dsul"
     grep -q 'last-error.sulliwood-root' "$dsul"
@@ -1270,7 +1282,8 @@ else
     grep -qF 'date -u +%Y-%m-%dT%H:%M:%SZ' "$dsul"
     grep -q 'gdm_log "start:' "$dsul"
     grep -q 'gdm_log "guard:' "$dsul"
-    grep -q 'gdm_log "sweep:' "$dsul"
+    grep -q 'existing mount preserved; reviewed non-forcing recovery required' "$dsul"
+    grep -q 'gdm_log "sweep:' "$lsul"
     grep -q 'gdm_log "render:' "$dsul"
     grep -q 'gdm_log exec: rclone' "$dsul"
     grep -q 'gdm_log "start:' "$lsul"
@@ -1305,7 +1318,7 @@ else
     # C6b — the sweep is asserted, not attempted. A swallowed `umount -f`
     # failure means the next line mounts on top of the corpse.
     grep -q 'exit 75' "$dsul"
-    grep -q 'survived the force-unmount' "$dsul"
+    grep -q 'existing mount preserved; reviewed non-forcing recovery required' "$dsul"
     grep -q 'survived the force-unmount' "$lsul"
 
     # The latency budget and the instrumentation ship in the argv, both platforms.
@@ -1346,7 +1359,7 @@ else
     no grep -q 'mountpoint -q' "$lwatch"
 
     # It supervises the real unit, by name, with the real supervisor.
-    grep -q 'launchctl kickstart -k' "$dwatch"
+    no grep -q 'launchctl kickstart -k' "$dwatch"
     grep -qF 'dev.tinyland.gdrive-mounts.sulliwood-root' "$dwatch"
     grep -q 'systemctl --user restart' "$lwatch"
     grep -qF 'gdrive-mounts-sulliwood-root.service' "$lwatch"
@@ -1378,8 +1391,9 @@ else
     # It captures before it acts, and SIGQUIT is on the capture path only —
     # labelled, because the resulting err.log block reads like a native crash
     # and has been read as one.
-    grep -q -- 'kill -QUIT' "$dwatch"
-    grep -qF 'induced traceback (not a crash)' "$dwatch"
+    no grep -q -- 'kill -QUIT' "$dwatch"
+    grep -qF 'diagnostic capture only; mount process and buffered writes are preserved' "$dwatch"
+    grep -q -- 'kill -QUIT' "$lwatch"
     grep -q 'core/stats' "$dwatch"
     grep -q 'vfs/stats' "$dwatch"
     grep -qF 'wedge.sulliwood-root.jsonl' "$dwatch"
@@ -1485,6 +1499,7 @@ else
     # the stand-downs, the consecutive-failure threshold, the capture, the
     # restart floor, and the wedge record.
     wd=${watchdogHarness { }}
+    wdhold=${watchdogHarness { allowForcedRecovery = false; }}
     wdfloor=${
       watchdogHarness {
         restartFloorSec = 0;
@@ -1677,6 +1692,127 @@ else
     no grep -q 'probe: unhealthy' "$s9/out"
     [ ! -e "$s9/restarts" ]
     [ ! -e "$s9/wedge.jsonl" ]
+
+    # 10. Darwin recovery hold preserves even a live child through diagnostic
+    # capture and subsequent unhealthy cycles. This executes the same capture
+    # tail that used to send SIGQUIT, with a real owned PID as its target.
+    s10="$w/s10"
+    mkdir -p "$s10"
+    touch "$s10/mounted" "$s10/active"
+    # Bash async children inherit SIGQUIT ignored. Reset it explicitly, and
+    # prove the discriminator with a separate owned positive-control child.
+    env --default-signal=QUIT bash -c 'ulimit -c 0; printf ready > "$1"; exec sleep 60' _ "$s10/positive-ready" &
+    positive_pid=$!
+    for tick in $(seq 1 100); do
+      [ -s "$s10/positive-ready" ] && break
+      sleep 0.05
+    done
+    [ -s "$s10/positive-ready" ]
+    kill -QUIT "$positive_pid"
+    set +e
+    wait "$positive_pid"
+    positive_rc=$?
+    set -e
+    [ "$positive_rc" = 131 ]
+    env --default-signal=QUIT bash -c 'ulimit -c 0; printf ready > "$1"; exec sleep 60' _ "$s10/held-ready" &
+    held_pid=$!
+    for tick in $(seq 1 100); do
+      [ -s "$s10/held-ready" ] && break
+      sleep 0.05
+    done
+    [ -s "$s10/held-ready" ]
+    printf '%s\n' "$held_pid" > "$s10/pid"
+    "$wdhold" "$s10/absent" "$s10" 5 > "$s10/out"
+    kill -0 "$held_pid"
+    kill "$held_pid"
+    wait "$held_pid" || true
+    [ ! -e "$s10/restarts" ]
+    [ ! -e "$s10/floor" ]
+    [ "$(grep -c '"action":"held-recovery-required"' "$s10/wedge.jsonl")" = 1 ]
+    [ "$(grep -c 'wedge capture' "$s10/capture.log")" = 1 ]
+    grep -q '"restart_count":0' "$s10/wedge.jsonl"
+
+    # 11. A mounted Darwin path is preserved before socket/config/cache-writer
+    # replacement. Extract and execute the emitted startup boundary with an
+    # exact owned mount-table stub; neither umount nor post-guard code may run.
+    s11="$w/s11"
+    mkdir -p "$s11/bin"
+    cat > "$s11/bin/mount" <<'EOF'
+    #!/bin/sh
+    printf 'fixture-root:/ on / (apfs)\nfixture:/ on /home/tester/GDrive/sulliwood (nfs)\n'
+    EOF
+    cat > "$s11/bin/umount" <<EOF
+    #!/bin/sh
+    touch "$s11/unmount-attempted"
+    exit 99
+    EOF
+    chmod +x "$s11/bin/mount" "$s11/bin/umount"
+    {
+      printf 'unit=fixture\npoint=/home/tester/GDrive/sulliwood\nerr=%s/error\n' "$s11"
+      printf 'gdm_log() { :; }\n'
+      sed -n '/# BEGIN Darwin existing mount admission/,/# END Darwin existing mount admission/p' "$dsul"
+      printf 'touch %s/continued\n' "$s11"
+    } > "$s11/guard.sh"
+    set +e
+    PATH="$s11/bin:$PATH" bash "$s11/guard.sh" 2> "$s11/error"
+    startup_rc=$?
+    set -e
+    [ "$startup_rc" = 75 ]
+    [ ! -e "$s11/unmount-attempted" ]
+    [ ! -e "$s11/continued" ]
+    grep -q 'existing mount preserved' "$s11/error"
+
+    # The same guard admits a freshly observed empty mount table. This is
+    # startup admission after externally established detach, not a detach test.
+    cat > "$s11/bin/mount" <<'EOF'
+    #!/bin/sh
+    printf 'fixture-root:/ on / (apfs)\n'
+    EOF
+    PATH="$s11/bin:$PATH" bash "$s11/guard.sh"
+    [ -f "$s11/continued" ]
+    [ ! -e "$s11/unmount-attempted" ]
+
+    # An observation failure cannot reopen startup admission. Existing config,
+    # socket and cache state belong after this guard, never in its failure path.
+    rm "$s11/continued"
+    cat > "$s11/bin/mount" <<'EOF'
+    #!/bin/sh
+    exit 13
+    EOF
+    set +e
+    PATH="$s11/bin:$PATH" bash "$s11/guard.sh" 2> "$s11/error"
+    startup_rc=$?
+    set -e
+    [ "$startup_rc" = 75 ]
+    [ ! -e "$s11/continued" ]
+    grep -q 'mount table unavailable' "$s11/error"
+
+    # Early matches in a table exceeding a pipe buffer remain occupied, and
+    # empty/malformed successful command output never becomes absence proof.
+    cat > "$s11/bin/mount" <<'EOF'
+    #!/bin/sh
+    printf 'fixture-root:/ on / (apfs)\nfixture:/ on /home/tester/GDrive/sulliwood (nfs)\n'
+    for item in $(seq 1 4096); do
+      printf 'fixture:/ on /Volumes/fixture-%s (apfs, local)\n' "$item"
+    done
+    EOF
+    set +e
+    PATH="$s11/bin:$PATH" bash "$s11/guard.sh" 2> "$s11/error"
+    startup_rc=$?
+    set -e
+    [ "$startup_rc" = 75 ]
+    [ ! -e "$s11/continued" ]
+    grep -q 'existing mount preserved' "$s11/error"
+    for invalid_table in "" 'unparseable' 'fixture:/ on /Volumes/other (apfs)'; do
+      printf '%s\n' "$invalid_table" > "$s11/table"
+      printf '#!/bin/sh\ncat %s/table\n' "$s11" > "$s11/bin/mount"
+      set +e
+      PATH="$s11/bin:$PATH" bash "$s11/guard.sh" 2> "$s11/error"
+      startup_rc=$?
+      set -e
+      [ "$startup_rc" = 75 ]
+      [ ! -e "$s11/continued" ]
+    done
 
     # ── layer 3c: the concatenated activation must hand back the PATH it got ──
     #

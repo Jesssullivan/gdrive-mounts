@@ -137,12 +137,8 @@ let
     else
       "mountpoint -q ${escapeShellArg point}";
 
-  sweepStaleMount =
-    point:
-    if cfg.platform == "darwin" then
-      "umount -f ${escapeShellArg point} >/dev/null 2>&1 || true"
-    else
-      "fusermount3 -u ${escapeShellArg point} >/dev/null 2>&1 || umount -f ${escapeShellArg point} >/dev/null 2>&1 || true";
+  sweepStaleMount = point:
+    "fusermount3 -u ${escapeShellArg point} >/dev/null 2>&1 || umount -f ${escapeShellArg point} >/dev/null 2>&1 || true";
 
   # Is anything mounted here, WITHOUT touching the filesystem? The watchdog asks
   # this about a mount that may be wedged, where `mountpoint -q` — which stats
@@ -176,7 +172,9 @@ let
   restartCommand =
     u:
     if cfg.platform == "darwin" then
-      ''launchctl kickstart -k "gui/$(id -u)/${mountLabel u}" >/dev/null 2>&1 || true''
+      # Deliberately no executor: neither SIGTERM nor a launchd restart is a
+      # non-forcing nfsmount shutdown. Recovery has a separate attended gate.
+      "false"
     else
       "systemctl --user restart ${escapeShellArg "${u.name}.service"} >/dev/null 2>&1 || true";
 
@@ -208,6 +206,8 @@ let
         inherit (cfg.cache) requireMountpoint waitSeconds;
       }}
 
+      ${lib.optionalString (cfg.platform == "darwin") plan.darwinStartupAdmission}
+
       gdm_log "start: pid $$, backend ${backend}, point $point"
 
       mkdir -p "$state"
@@ -227,18 +227,11 @@ let
       # spills onto the boot disk.
       gdm_wait_for_cache
 
-      # Clear anything already mounted at the point (a dead NFS loopback left by
-      # a killed rclone keeps answering stat from cache and hangs every real
-      # read until it is force-unmounted). We are the only legitimate mounter
-      # of this path and we are not running yet, so an existing mount is stale.
-      #
-      # The sweep must be *asserted*, not attempted. `umount -f` against a
-      # `hard,nointr` mount whose callers are blocked in RPC can return EBUSY,
-      # and a swallowed failure means the next line mounts on top of the corpse:
-      # a live process, a listening port, and a client still addressed to the
-      # dead one. Silent, and indistinguishable from the wedge it causes.
+      ${lib.optionalString (cfg.platform != "darwin") ''
+      # Linux retains its existing FUSE sweep. Darwin already refused an
+      # occupied or unavailable mount table before any shared state write.
       if ${isMounted u.point}; then
-        gdm_log "sweep: stale mount at $point — force-unmounting"
+        gdm_log "sweep: existing mount at $point"
         ${sweepStaleMount u.point}
         if ${isMounted u.point}; then
           gdm_log "sweep: FAILED — $point is still mounted (exit 75)"
@@ -251,6 +244,7 @@ let
       else
         gdm_log "sweep: nothing mounted at $point"
       fi
+      ''}
       mkdir -p "$point"
       rm -f "$err"
 
@@ -298,6 +292,7 @@ let
 
       ${plan.shellPreamble}
       ${plan.watchdogShell {
+        allowForcedRecovery = cfg.platform != "darwin";
         intervalSec = cfg.watchdog.intervalSec;
         probeTimeoutSec = cfg.watchdog.probeTimeoutSec;
         failureThreshold = cfg.watchdog.failureThreshold;
