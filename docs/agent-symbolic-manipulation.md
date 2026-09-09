@@ -79,6 +79,17 @@ Neither flag is a claim that deduplication or retirement is complete. Private
 filenames, warning details and quarantine locations stay in the manifest and
 journal; standard output reports counts.
 
+After approved retirement, run `just photos verify PLAN_SHA256 --mounted-readback`.
+This requires the completed retirement receipt, reads every canonical payload
+through the real mount, compares its SHA256, and independently verifies Drive
+again before reporting `mounted_payloads_verified: true`. Missing or changed
+payloads fail the command even if retirement has already completed. Retry the
+same manifest after resolving the fault; do not regenerate quarantined sources.
+Readback also binds the independently verified byte length: a wrong initial
+size or an overlong stream refuses before copying excess bytes into private
+state. Case-variant curation paths require explicit reconciliation during
+planning rather than being silently renamed or treated as exact path matches.
+
 `apply` adopts accepted WebP bytes before considering conversion. The latest
 orientation judgments were relative to QuickLook intermediates; their angles
 must not be replayed blindly against newly EXIF-transposed HEICs. Preserve
@@ -97,13 +108,26 @@ same-byte aliases become explicit `verified-webp-copy` retirement candidates.
 Different-byte outputs at other aliases remain preserved for review.
 No canonical keeper ID can also be a retirement candidate for another original.
 
-Before live publication, inspect the actual `orientation-judged.csv` and
-`design-picks.md` grammar and authoritative copies. Bind selections and
-do-not-publish references through duplicate aliases to canonical originals
-and WebPs. Current byte-preservation checks do not prove that those references
-still resolve after deduplication; missing or ambiguous references remain an
-acceptance blocker. The historical selection count is evidence to reconcile,
-not a universal parser rule. Do not run `apply` on an unreviewed curation plan.
+New CLI plans require the reviewed `orientation-judged.csv` (`name,cw,how`)
+and the selection/restriction sections of `design-picks.md`. The parser binds
+legacy `.jpg` stems through duplicate aliases to one canonical original group.
+Missing or ambiguous references block publication. The historical selection
+count is evidence to reconcile, not a universal parser rule. The exact reviewed
+`IMG_2630_placeholder` no-file row is retained as an annotation; other missing
+references do not receive an exemption. CSV rotations remain historical notes,
+never encoder instructions. Missing accepted derivatives need orientation
+review before any generated replacement can be published.
+
+At warning memory pressure, inspection is limited to the four named root and
+`webp/` copies of these documents, at most 64 KiB each, after checking the SSD
+UUID and non-symlink paths. Critical pressure refuses even these reads. Corpus
+hashing, decoding, builds and mounted writes require normal headroom.
+
+Drive and SSD provenance copies must agree by bytes. A different copy blocks
+publication for an authority decision; modification time does not select a
+winner. The canonical documents remain byte-for-byte unchanged under `webp/`.
+Only their two named duplicate root files join the approved retirement scope;
+unrelated root files remain untouched.
 
 New private plans retain `alias_bindings`: original and accepted-WebP aliases
 join through original SHA256 values and canonical entry keys. Drive aliases
@@ -117,9 +141,19 @@ canonical IDs, paths and hashes. That keeps a non-keeper selection or
 restriction reference traceable after retirement without changing the sidecar
 bytes. A bare filename or stem returns every matching original, including
 nested names; it never silently prefers the root-level file. This is lineage
-evidence, not a parser or enforcement of the actual selection/restriction
-syntax. Older manifests remain resumable but do not acquire missing alias
-evidence retroactively.
+evidence. New plans also preserve the parsed selection/restriction syntax;
+older manifests remain resumable but do not acquire curation or catalog proof
+retroactively.
+
+`apply` promotes and independently verifies all media before preparing
+`webp/gftb-catalog.json`. It then writes this deterministic catalog through a
+second UUID-staging and same-ID-promotion stage under the same manifest. The
+catalog links relative paths, canonical Drive IDs/hashes, original aliases and
+all curation records. It preserves selection and restriction independently;
+absence of a restriction is not publication consent. Its recipe and prepared
+hash are journal-bound. Timestamps, retirement status and its own ID/hash are
+excluded. Existing unrecognized catalogs block publication instead of being
+overwritten. A same-manifest resume must reproduce the exact prepared bytes.
 
 Publication is serial and mount-guarded. Write bytes into journal-owned UUID
 staging names through the mount, verify their exact Drive IDs and hashes after

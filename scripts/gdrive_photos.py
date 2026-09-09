@@ -38,6 +38,10 @@ RECIPE = {"version": 1, "quality": 80, "long_edge": 2000, "method": 6,
 FOLDER_MIME = "application/vnd.google-apps.folder"
 MAX_FILES = 10000
 MAX_BYTES = 64 * 1024 ** 3
+CURATION_NAMES = ("orientation-judged.csv", "design-picks.md")
+CURATION_PATHS = {path for name in CURATION_NAMES for path in (name, f"webp/{name}")}
+CATALOG_PATH = "webp/gftb-catalog.json"
+MAX_SIDECAR_BYTES = 64 * 1024
 
 
 class Refusal(RuntimeError):
@@ -505,20 +509,31 @@ class MountedIO:
         finally:
             os.close(fd)
 
-    def read_to(self, path, destination, expected_sha):
+    def read_to(self, path, destination, expected_sha, *, expected_size=None):
+        if expected_size is not None and (type(expected_size) is not int
+                                         or not 0 <= expected_size <= MAX_BYTES):
+            raise Refusal("mounted read requires a bounded verified byte length")
+        limit = MAX_BYTES if expected_size is None else expected_size
         with self.parent(path) as (parent, name):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
             with os.fdopen(fd, "rb") as source, Path(destination).open("xb") as target:
                 before = fingerprint(os.fstat(source.fileno()))
                 if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                     raise Refusal("mounted original is not a regular file")
+                if before["size"] > limit or (expected_size is not None and before["size"] != expected_size):
+                    raise Refusal("mounted payload size differs from the verified byte length")
                 h = hashlib.sha256()
-                for block in iter(lambda: source.read(1024 * 1024), b""):
+                count = 0
+                while block := source.read(min(1024 * 1024, limit - count + 1)):
                     self.check()
+                    count += len(block)
+                    if count > limit:
+                        raise Refusal("mounted payload exceeds the verified byte length")
                     h.update(block)
                     target.write(block)
                 self.check()
-                if fingerprint(os.fstat(source.fileno())) != before or h.hexdigest() != expected_sha:
+                if (fingerprint(os.fstat(source.fileno())) != before or h.hexdigest() != expected_sha
+                        or (expected_size is not None and count != expected_size)):
                     raise Refusal("mounted original does not match its planned ID-resolved bytes")
         Path(destination).chmod(0o400)
 
@@ -850,7 +865,12 @@ def alias_candidates(plan, reference):
     return sorted(matches)
 
 
-def make_plan(source_root, mount_point, remote, validator=validate_webp):
+def make_plan(source_root, mount_point, remote, validator=validate_webp, *, require_curation=False):
+    """Inventory a whole collection; the operator CLI always requires curation.
+
+    The default retains the pre-catalog API for legacy safety fixtures. There
+    is deliberately no command-line switch to publish a new uncurated plan.
+    """
     source_root = Path(source_root)
     local = local_inventory(source_root)
     if not any(p.startswith("originals/") for p in local):
@@ -877,7 +897,8 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
         if remote_bytes > MAX_BYTES:
             raise Refusal("Drive corpus exceeds the bounded readback byte budget")
         hashes[row["id"]] = remote.sha256(row)
-    originals = [r for r in files if not r["path"].startswith("webp/") and r["id"] in hashes]
+    originals = [r for r in files if not r["path"].startswith("webp/") and r["id"] in hashes
+                 and not (require_curation and r["path"].casefold() in CURATION_PATHS)]
     blockers = []
     for rows in by_path.values():
         sources = [r for r in rows if r in originals]
@@ -989,7 +1010,7 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             if row["id"] != entry["keep_id"]:
                 retirement[row["id"]] = {"row": row, "sha256": sha,
                                          "reason": "verified-webp-copy", "canonical_key": entry["key"]}
-    for name in ("orientation-judged.csv", "design-picks.md"):
+    for name in CURATION_NAMES:
         if name in local and f"webp/{name}" in local and local[name]["sha256"] != local[f"webp/{name}"]["sha256"]:
             blockers.append(f"conflicting provenance copies: {name}")
         source = name if name in local else f"webp/{name}"
@@ -997,6 +1018,11 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             warnings.append(f"missing provenance sidecar: {name}")
             continue
         wanted, sha = f"webp/{name}", local[source]["sha256"]
+        copies = [r for path in (name, wanted) for r in by_path.get(path, [])]
+        if require_curation and any(r["path"] not in (name, wanted) for r in copies):
+            blockers.append(f"case-variant provenance path requires explicit reconciliation: {name}")
+        if require_curation and any(hashes.get(r["id"]) != sha for r in copies):
+            blockers.append(f"Drive/SSD provenance differs: {name}; preserve every copy for authority review")
         matches = [r for r in by_path.get(wanted.casefold(), []) if hashes.get(r["id"]) == sha]
         keeper = min(matches, key=lambda r: r["id"]) if matches else None
         entry = {"kind": "provenance", "path": wanted if keeper else unique_path(wanted, sha, occupied),
@@ -1005,8 +1031,14 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
                  "keep_id": keeper["id"] if keeper else None}
         entry["key"] = digest(entry)
         entries.append(entry)
+        if require_curation:
+            for row in copies:
+                if row["id"] != entry["keep_id"] and hashes.get(row["id"]) == sha:
+                    retirement[row["id"]] = {"row": row, "sha256": sha,
+                                             "reason": "verified-provenance-copy",
+                                             "canonical_key": entry["key"]}
     judged = source_root / "orientation-judged.csv"
-    if "orientation-judged.csv" in local:
+    if "orientation-judged.csv" in local and not require_curation:
         with judged.open(newline="") as f:
             rows = list(csv.DictReader(f))
         names = {PurePosixPath(p).stem for p in local if p.startswith("originals/")}
@@ -1020,7 +1052,8 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
     canonical_ids = {entry["keep_id"] for entry in entries if entry["keep_id"] is not None}
     retirement = {identifier: item for identifier, item in retirement.items() if identifier not in canonical_ids}
     covered = {e["sha256"] for e in entries if e["sha256"]}
-    local_retirement = [p for p in sorted(local) if PurePosixPath(p).parts[0] in RETIRABLE_DIRS
+    local_retirement = [p for p in sorted(local) if (PurePosixPath(p).parts[0] in RETIRABLE_DIRS
+                        or (require_curation and p in CURATION_NAMES))
                         and local[p]["sha256"] in covered]
     unresolved = [{"path": p, "reason": "no verified canonical byte-equivalent; preserve locally"}
                   for p in sorted(local) if PurePosixPath(p).parts[0] in RETIRABLE_DIRS and p not in local_retirement]
@@ -1034,7 +1067,97 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp):
             "warnings": warnings, "blockers": blockers}
     plan["alias_bindings_version"] = 1
     plan["alias_bindings"] = _derive_alias_bindings(plan)
+    if require_curation:
+        attach_curation(plan, source_root)
     return plan
+
+
+def attach_curation(plan, source_root):
+    """Bind the reviewed sidecar bytes and a deferred catalog recipe."""
+    from gftb_curation import CurationError, parse_curation
+    sources = {}
+    for name in CURATION_NAMES:
+        matches = [e for e in plan["entries"] if e["kind"] == "provenance"
+                   and PurePosixPath(e["path"]).name == name]
+        if len(matches) != 1:
+            plan["blockers"].append(f"missing canonical curation document: {name}")
+            continue
+        entry = matches[0]
+        path = Path(source_root) / relative(entry["source"]["local"])
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SIDECAR_BYTES:
+                raise Refusal("curation document is not a bounded regular file")
+            raw = source.read(MAX_SIDECAR_BYTES + 1)
+            after = os.fstat(source.fileno())
+        if (len(raw) > MAX_SIDECAR_BYTES or fingerprint(before) != fingerprint(after)
+                or hashlib.sha256(raw).hexdigest() != entry["sha256"]):
+            raise Refusal("curation document changed after inventory")
+        sources[name] = {"text": raw.decode("utf-8"), "sha256": entry["sha256"],
+                         "entry_key": entry["key"]}
+    plan["curation_sources"] = sources
+    if len(sources) != len(CURATION_NAMES):
+        return
+    try:
+        plan["curation"] = parse_curation(
+            sources[CURATION_NAMES[0]]["text"].encode("utf-8"),
+            sources[CURATION_NAMES[1]]["text"].encode("utf-8"), plan["alias_bindings"])
+    except CurationError as error:
+        plan["blockers"].append(f"curation needs review: {error}")
+        return
+    if any(e["kind"] == "webp" and e["recipe"]["operation"] == "encode-original"
+           for e in plan["entries"]):
+        plan["blockers"].append("missing accepted derivative requires an orientation review before publication")
+    if any(r["path"].casefold() == CATALOG_PATH for r in plan["remote_inventory"]):
+        plan["blockers"].append("existing catalog requires identity/content reconciliation; preserve it")
+    if CATALOG_PATH in plan["local"] or "gftb-catalog.json" in plan["local"]:
+        plan["blockers"].append("existing SSD catalog requires reconciliation; preserve it")
+    entry = {"kind": "catalog", "path": CATALOG_PATH, "sha256": None,
+             "recipe": {"operation": "curation-catalog", "version": 1,
+                        "curation_sha256": digest(plan["curation"]),
+                        "entry_keys": sorted(e["key"] for e in plan["entries"])},
+             "source": {"local": None, "remote": None}, "keep_id": None}
+    entry["key"] = digest(entry)
+    plan["entries"].append(entry)
+
+
+def validate_curation(plan):
+    if "curation_sources" not in plan and "curation" not in plan:
+        return  # Immutable legacy manifests remain resumable without new proof.
+    from gftb_curation import CurationError, parse_curation
+    try:
+        sources = plan["curation_sources"]
+        raw = []
+        for name in CURATION_NAMES:
+            value = sources[name]
+            data = value["text"].encode("utf-8")
+            entries = [e for e in plan["entries"] if e["key"] == value["entry_key"]]
+            if (len(data) > MAX_SIDECAR_BYTES or hashlib.sha256(data).hexdigest() != value["sha256"]
+                    or len(entries) != 1 or entries[0]["kind"] != "provenance"
+                    or entries[0]["path"] != f"webp/{name}"
+                    or entries[0]["sha256"] != value["sha256"]):
+                raise Refusal("curation byte provenance differs from canonical entries")
+            raw.append(data)
+        expected = parse_curation(*raw, plan["alias_bindings"])
+        catalogs = [e for e in plan["entries"] if e["kind"] == "catalog"]
+        recipe = {"operation": "curation-catalog", "version": 1,
+                  "curation_sha256": digest(expected),
+                  "entry_keys": sorted(e["key"] for e in plan["entries"] if e["kind"] != "catalog")}
+        if (expected != plan["curation"] or len(catalogs) != 1 or catalogs[0]["recipe"] != recipe
+                or catalogs[0]["path"] != CATALOG_PATH or catalogs[0]["keep_id"] is not None
+                or catalogs[0]["sha256"] is not None):
+            raise Refusal("catalog recipe differs from immutable curation evidence")
+    except (KeyError, TypeError, CurationError):
+        raise Refusal("curation evidence is incomplete or invalid") from None
+
+
+def catalog_content(plan, verified):
+    from gftb_curation import build_catalog
+    validate_curation(plan)
+    provenance = [{field: verified[e["key"]][field] for field in ("path", "id", "sha256")}
+                  for e in plan["entries"] if e["kind"] == "provenance"]
+    return build_catalog(plan["curation"], verified, plan["drive_root_id"], provenance)
 
 
 @contextlib.contextmanager
@@ -1087,21 +1210,36 @@ def apply_plan(plan, key, state, remote, mount, encoder=convert, validator=valid
     validate_alias_bindings(plan)
     if plan.get("blockers"):
         raise Refusal("plan contains unresolved provenance decisions")
+    validate_curation(plan)
+    if any(event.get("event") == "retired" for event in state.events(key)):
+        with mount:
+            verified = verify_plan(plan, key, state, remote)
+        state.event(key, "apply-noop", entries=len(verified), reason="retired-plan")
+        return len(verified)
+    media = [entry for entry in plan["entries"] if entry["kind"] != "catalog"]
+    _apply_entries(plan, key, state, remote, mount, media, encoder, validator)
+    catalogs = [entry for entry in plan["entries"] if entry["kind"] == "catalog"]
+    if catalogs:
+        # IDs do not exist until media promotion. Verify those exact objects
+        # first, then prepare a deterministic second publication stage.
+        verified = verify_plan(plan, key, state, remote, include_catalog=False)
+        payload = catalog_content(plan, verified)
+        _apply_entries(plan, key, state, remote, mount, catalogs, encoder, validator,
+                       catalog_payload=payload)
+        verify_plan(plan, key, state, remote)
+    return len(plan["entries"])
+
+
+def _apply_entries(plan, key, state, remote, mount, selected, encoder, validator,
+                   catalog_payload=None):
     namespace(plan, remote)
     remote.uploads_empty()
     entries = {entry["key"]: entry for entry in plan["entries"]}
     publications = []
     with mount:
-        if any(event.get("event") == "retired" for event in state.events(key)):
-            # Successful retirement deliberately removes active local inputs.
-            # A same-plan rerun must prove the existing canonical IDs/bytes,
-            # not try to publish again from those quarantined inputs.
-            verified = verify_plan(plan, key, state, remote)
-            state.event(key, "apply-noop", entries=len(verified), reason="retired-plan")
-            return len(verified)
         # Reconcile all same-name/different-byte originals before accessing their
         # pathname view. These metadata-only API moves preserve each original ID.
-        for entry in plan["entries"]:
+        for entry in selected:
             row = entry.get("rename_from")
             if row is None:
                 continue
@@ -1121,7 +1259,7 @@ def apply_plan(plan, key, state, remote, mount, encoder=convert, validator=valid
                 raise Refusal("original ID-preserving rename requires reconciliation")
             remote.refresh(str(PurePosixPath(entry["path"]).parent))
             state.event(key, "original-renamed", id=row["id"], path=entry["path"])
-        for entry in plan["entries"]:
+        for entry in selected:
             namespace(plan, remote)
             if entry["keep_id"]:
                 if entry["kind"] == "original":
@@ -1130,7 +1268,16 @@ def apply_plan(plan, key, state, remote, mount, encoder=convert, validator=valid
                 state.event(key, "kept", entry=entry["key"], remote_id=entry["keep_id"])
                 continue
             with contextlib.ExitStack() as stack:
-                if entry["kind"] == "webp" and not entry["source"]["local"]:
+                if entry["kind"] == "catalog":
+                    if not isinstance(catalog_payload, bytes):
+                        raise Refusal("catalog requires independently verified media identities")
+                    temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="catalog-", dir=state.root))
+                    path = Path(temp) / "catalog.json"
+                    with path.open("xb") as output:
+                        output.write(catalog_payload)
+                    path.chmod(0o400)
+                    expected = hash_file(path)
+                elif entry["kind"] == "webp" and not entry["source"]["local"]:
                     if entry["recipe"]["codec_versions"] != codec_versions():
                         raise Refusal("encoder library versions changed since planning")
                     original = entries[entry["original_key"]]
@@ -1259,15 +1406,20 @@ def journaled_canonical(entry, expected_sha, events):
     return identifier, parent
 
 
-def verify_plan(plan, key, state, remote):
+def verify_plan(plan, key, state, remote, *, include_catalog=True):
     validate_alias_bindings(plan)
     if plan.get("blockers"):
         raise Refusal("plan contains unresolved provenance decisions")
+    validate_curation(plan)
     remote.uploads_empty()
     rows = namespace(plan, remote)
     events = state.events(key)
     verified = {}
-    for entry in plan["entries"]:
+    # Catalog verification is last even if the immutable entries are reordered.
+    selected = [e for e in plan["entries"] if e["kind"] != "catalog"]
+    if include_catalog:
+        selected += [e for e in plan["entries"] if e["kind"] == "catalog"]
+    for entry in selected:
         expected = entry["sha256"]
         if expected is None:
             prepared = [e for e in events if e.get("event") == "prepared" and e.get("entry") == entry["key"]
@@ -1275,6 +1427,11 @@ def verify_plan(plan, key, state, remote):
             if not prepared:
                 raise Refusal("generated output has not been prepared under this recipe")
             expected = prepared[-1]["sha256"]
+            if len({e["sha256"] for e in prepared}) != 1:
+                raise Refusal("prepared output hashes conflict across resume")
+        if entry["kind"] == "catalog":
+            if hashlib.sha256(catalog_content(plan, verified)).hexdigest() != expected:
+                raise Refusal("catalog bytes differ from verified canonical IDs and curation")
         if entry["keep_id"]:
             identifier, parent = entry["keep_id"], None
             approved_aliases = {item["row"]["id"]: item["row"] for item in plan["retirement"]
@@ -1304,7 +1461,7 @@ def verify_plan(plan, key, state, remote):
     remote.uploads_empty()
     alias_evidence = ({"alias_bindings_sha256": digest(plan["alias_bindings"])}
                       if "alias_bindings_version" in plan else {})
-    state.event(key, "verified", entries=verified, **alias_evidence)
+    state.event(key, "verified" if include_catalog else "media-verified", entries=verified, **alias_evidence)
     return verified
 
 
@@ -1370,7 +1527,12 @@ def _retire_verified(plan, key, state, remote, verified, root_fd):
                     original_parent=row["parent"], quarantine_parent=moved["parent"])
     for rel in paths:
         expected_sha = plan["local"][rel]["sha256"]
-        canonical_rows = [entry["row"] for entry in verified.values() if entry["sha256"] == expected_sha]
+        if "curation" in plan and rel in CURATION_PATHS:
+            provenance_key = plan["curation_sources"][PurePosixPath(rel).name]["entry_key"]
+            proof = verified.get(provenance_key)
+            canonical_rows = [proof["row"]] if proof and proof["sha256"] == expected_sha else []
+        else:
+            canonical_rows = [entry["row"] for entry in verified.values() if entry["sha256"] == expected_sha]
         if not canonical_rows:
             raise Refusal("local retirement lacks a verified byte-equivalent canonical object")
         # Remote retirement may have taken arbitrarily long. Re-prove the
@@ -1418,23 +1580,43 @@ def configuration(settings_path, state_override):
     return point, state_root, photo_state, unit["sock"]
 
 
-def verified_location(plan, key, state, remote, mount):
+def verified_location(plan, key, state, remote, mount, *, mounted_readback=False):
     """Verify Drive content while holding the actual mounted corpus directory.
 
     The leaf below is never opened or created: parent() opens GFTB Stuff
     without following symlinks. Reopening it catches directory replacement
     during independent Drive verification. This is not a deduplication verdict.
     """
+    if mounted_readback and not any(e.get("event") == "retired" for e in state.events(key)):
+        raise Refusal("mounted payload readback requires completed approved retirement first")
     with mount:
         with mount.parent(".gdm-location-check") as (folder_fd, _):
             before = os.fstat(folder_fd)
             verified = verify_plan(plan, key, state, remote)
+            if mounted_readback:
+                for entry_key, proof in sorted(verified.items()):
+                    with tempfile.TemporaryDirectory(prefix="mounted-readback-", dir=state.root) as temp:
+                        target = Path(temp) / "payload"
+                        try:
+                            expected_size = int(proof["row"]["size"])
+                        except (KeyError, TypeError, ValueError):
+                            raise Refusal("canonical payload lacks a verified byte length") from None
+                        mount.read_to(proof["path"], target, proof["sha256"], expected_size=expected_size)
+                        if hash_file(target)["sha256"] != proof["sha256"]:
+                            raise Refusal("mounted canonical payload differs from independently verified Drive bytes")
+                    state.event(key, "mounted-payload-verified", entry=entry_key,
+                                id=proof["id"], path=proof["path"], sha256=proof["sha256"])
+                # A pathname read must not hide a concurrent Drive substitution.
+                if verify_plan(plan, key, state, remote) != verified:
+                    raise Refusal("canonical Drive objects changed during mounted readback")
             mount.check()
             with mount.parent(".gdm-location-check") as (current_fd, _):
                 after = os.fstat(current_fd)
                 if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                     raise Refusal("mounted GFTB directory changed during verification")
             mount.check()
+    if mounted_readback:
+        state.event(key, "mounted-readback-verified", entries=len(verified))
     return len(verified)
 
 
@@ -1445,8 +1627,12 @@ def main(argv=None):
     parser.add_argument("--approve-digest", help="explicit exact-manifest approval for recoverable retirement")
     parser.add_argument("--settings", default=str(Path.home() / ".local/state/gdrive-mounts/effective-settings.json"))
     parser.add_argument("--state-dir")
+    parser.add_argument("--mounted-readback", action="store_true",
+                        help="verify every canonical payload through the mount after approved retirement")
     args = parser.parse_args(argv)
     try:
+        if args.mounted_readback and args.command != "verify":
+            raise Refusal("--mounted-readback is only valid with verify")
         point, runtime, private, sock = configuration(args.settings, args.state_dir)
         state = State(private)
         remote = RcloneRemote(runtime / f"rclone-{ORG}.conf", state, sock)
@@ -1454,7 +1640,7 @@ def main(argv=None):
             if args.command == "plan":
                 if args.plan_digest:
                     raise Refusal("plan does not accept an existing digest")
-                plan = make_plan(SSD_ROOT, point, remote)
+                plan = make_plan(SSD_ROOT, point, remote, require_curation=True)
                 key = state.save(plan)
                 result = {"plan": key, "entries": len(plan["entries"]),
                           "retirement_candidates": len(plan["retirement"]), "warning_count": len(plan["warnings"]),
@@ -1468,7 +1654,8 @@ def main(argv=None):
                 if args.command == "apply":
                     result = {"entries": apply_plan(plan, key, state, remote, MountedIO(point))}
                 elif args.command == "verify":
-                    result = {"verified": verified_location(plan, key, state, remote, MountedIO(point))}
+                    result = {"verified": verified_location(plan, key, state, remote, MountedIO(point),
+                                                           mounted_readback=args.mounted_readback)}
                 else:
                     result = retire_plan(plan, key, args.approve_digest, state, remote)
                     result.pop("quarantine", None)  # Exact locations remain in the private plan/journal.
@@ -1478,6 +1665,7 @@ def main(argv=None):
                 "absolute_path": str(point / FOLDER),
                 "drive_folder_id": plan["drive_root_id"],
                 "mounted_directory_verified": args.command == "verify",
+                "mounted_payloads_verified": args.command == "verify" and args.mounted_readback,
                 "drive_contents_verified": args.command in {"verify", "retire"},
             }
             result["unresolved_files"] = len(plan.get("unresolved", []))

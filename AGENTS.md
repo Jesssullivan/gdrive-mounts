@@ -29,6 +29,23 @@ target — see `docs/position.md`.
    because Apple NFS lacks exclusive rename on this backend. Preserve existing
    objects and refuse name ambiguity; never fall back to an overwriting rename
    or claim globally atomic filename exclusion against concurrent writers.
+8. The Neo photo tranche uses the whole-collection manifest and a portable
+   `webp/gftb-catalog.json` alongside unchanged curation documents. Recover
+   Drive-only accepted WebPs to SSD staging by exact reviewed ID/hash, never
+   by re-encoding. Preserve historical rotation notes without replaying them.
+   These choices were ratified by interview on 2026-09-08.
+9. At warning memory pressure, allow only the four named root/`webp/`
+   `orientation-judged.csv` and `design-picks.md` sidecars, each at most 64 KiB,
+   after SSD identity and non-symlink path checks. Critical pressure refuses;
+   corpus hashing, codecs, builds and mount writes require normal headroom.
+10. This lane prepares Neo closure/runtime/recovery readiness. Before any live
+    recovery, qualify supervision controls on a disposable service. One
+    attended, non-forcing attempt with writers paused and cache/config
+    preserved is permitted even if upload status remains unknown; unknown
+    buffered writes remain a risk, not evidence of drainage. Stop on failure
+    or ambiguity; no forced-unmount or signal-to-rclone fallback. The parallel
+    lab agent owns the ready direct local switch, not interim preparation.
+    Permanent restart-policy and fleet hardening follow the Neo photo proof.
 
 ## Where each fact lives
 
@@ -78,6 +95,7 @@ here), prompt-toon (agent-output shaping conventions).
 | Secrets scan, commit history | `just secrets-scan-history` |
 | Shell library unit tests | `just test-lib` |
 | Synthetic photo safety contracts | `just test-photos` |
+| Disposable supervision controller contracts (no live service) | `just test-maintenance` |
 | Home-manager module eval | `just hm-eval` |
 | Home-manager eval proof, built | `just hm-eval-build` |
 | Bazel candidate graph | `just bazel-test` |

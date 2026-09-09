@@ -422,6 +422,29 @@ cannot be established, stop: do not substitute SIGTERM, SIGQUIT, `kickstart -k`
 or force-unmount. Recovery and cache-loss risk require a separate operator
 decision; source preparation or general switch permission is not that decision.
 
+For the Neo photo tranche, the operator ratified one conditional non-forcing
+attempt on 2026-09-08, including the disclosed risk of unknown buffered writes.
+That does not waive the qualification, resource, writer-pause or cache-preservation
+gates. Require natural exit of the original rclone process after successful
+detach; disappearance from the mount table alone is insufficient. A busy,
+timed-out or ambiguous result stops the attempt. No force or signal fallback.
+
+`just qualify-maintenance --attended --scratch-parent /absolute/private/directory`
+tests only a random disposable launchd service. The selected existing scratch
+parent must be user-owned, mode 0700, inside the authorized workspace and outside
+`/tmp`. The command tests enabled restart as a positive control, whether disabling
+preserves a live process, suppression of restart after failure, and re-enabling.
+Its receipt records the OS, source hash and exact tested supervision settings.
+It does not stop, inspect or recover the real mount and does not prove upload
+drainage or the separate watchdog's `KeepAlive = true` behavior. A failed or
+inconclusive result blocks recovery.
+
+The fixture removes only its own known files and unloads its random service.
+An uncertain cleanup preserves the exact directory and reports it. Clearing its
+disabled override can leave an enabled label record in launchd's persistent
+database; the tool never edits that database. `just test-maintenance` exercises
+the controller with simulated services and time, without changing launchd.
+
 ### Mutating entrypoints
 
 These commands are not an ordered recovery recipe. Use only the command

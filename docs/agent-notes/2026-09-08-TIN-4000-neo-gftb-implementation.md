@@ -479,3 +479,76 @@ recovery can be proposed. This corrects unsafe operational advice; it does
 not implement, authorize or prove a live recovery. Existing cache bytes,
 metadata, config, logs and service state were untouched. No switch or photo
 completion is claimed, and no message was sent to the parallel lab agent.
+
+## Interview implementation — 2026-09-08 Neo local date
+
+Implementation continued after planning-mode interviews; verification below
+finished after 2026-09-09T01:00Z. The ratified choices now live in `AGENTS.md`
+and executable contracts. They supersede earlier preparation-ownership and
+unresolved-grammar statements above: this lane prepares closure/runtime/recovery
+readiness; the parallel lab agent receives only a verified SWITCH READY handoff
+and performs the direct local switch. No interim lab communication was sent.
+
+The selected route is whole-collection, SSD-curation-first, with a portable
+Drive-side catalog and exact-ID/hash recovery of any Drive-only accepted WebPs
+into existing SSD staging. Historical orientation notes are not encoder input.
+The operator permits one conditional non-forcing recovery attempt despite
+unknown uploads only after disposable supervision qualification, writer pause,
+cache/config preservation and resource admission. Failure or ambiguity stops it.
+
+Planning had read only the four approved sidecars after SSD UUID and path
+guards: each root/`webp/` CSV pair was 5229 bytes, each Markdown pair 2315
+bytes, and each pair compared byte-identical. These contained 228 orientation
+records including one exact declared no-file placeholder, 40 selection
+references and two do-not-publish references. Those are curation facts, not a
+fresh image inventory or Drive-side authority proof. No real sidecars or photos
+were reread during this implementation pass.
+
+The implementation now:
+
+- Parses the observed CRLF/quoted CSV and Markdown sections, preserving raw
+  bytes/records. Legacy `.jpg` stems must resolve to one original-content group.
+  Missing/ambiguous references and malformed restriction records fail closed.
+  The exact `tiebreak:no file, placeholder, no cue` row is an annotation only.
+- Requires curation in new CLI plans. Canonical media are promoted and verified
+  first; deterministic `webp/gftb-catalog.json` bytes are then prepared and
+  published by the same mount-staged, verified-ID promotion mechanism. The
+  manifest binds the recipe, and the journal fixes its bytes and ID on resume.
+- Preserves selection and restriction independently, unchanged sidecars,
+  accepted derivatives and original alias evidence. Existing catalogs,
+  differing provenance copies and case-variant sidecar paths block for review.
+  Only the two named duplicate root documents extend local retirement scope;
+  their own canonical provenance entries must still verify before quarantine.
+- Adds `photos verify --mounted-readback` after approved retirement. Every
+  canonical payload must match its independently verified length and SHA256;
+  overlong streams stop before excess bytes are copied. A second independent
+  Drive check and mounted-directory identity recheck precede success.
+- Adds `just qualify-maintenance --attended --scratch-parent ...`, a disposable
+  launchd experiment, with synthetic controller tests registered through just,
+  Bazel and Nix. It tests the mount's SuccessfulExit=false/RunAtLoad/background/
+  throttle-30 shape, not the separate unconditional watchdog. Actual Darwin
+  qualification remains unrun; no real service action is claimed.
+
+Validation of the final source: `just test-photos` ran 153 tests: 151 passed,
+two existing ambient codec fixtures skipped. `just test-maintenance` passed
+18 tests. Whitespace, shell syntax, endpoint-free checks and both new command
+help surfaces passed. The working-tree secrets scan passed. Nix/Bazel builds,
+strict native codec acceptance, real launchd qualification and live photo
+phases were not run. Earlier Linux codec proof does not certify this source.
+
+The implementation admission snapshot returned warning memory pressure (2),
+109 MiB unused memory, 4642 MiB wired and 1751 MiB compressed. Heavy work and
+live operations stayed paused; no resource polling or application termination
+was used to obtain admission. The signed lab candidate still resolves to
+`478e9067ca578bbdfc986da0b7caecf0fa880627`. No clean checkout of that candidate
+exists among the current lab worktrees; the shared primary belongs to another
+lane. This session exports no worktree-creation authorization. No alternate
+checkout, build hatch, closure realization or modification of shared lab work
+was attempted.
+
+Resume prerequisites are normal resource admission and an authorized clean
+candidate checkout, followed by exact closure/runtime preparation, disposable
+qualification and the reviewed recovery/switch gates. Upload state remains
+unreconciled. No real mount, cache, photo, Drive object, sharing or credential
+was changed. Neither SWITCH READY nor GFTB COMPLETE is claimed; the proposed
+GFTB absolute path is not yet an authoritative live-data acceptance result.

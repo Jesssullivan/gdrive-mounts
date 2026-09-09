@@ -635,6 +635,7 @@ class CLIReportingTests(unittest.TestCase):
                     "absolute_path": "/synthetic/mount/GFTB Stuff",
                     "drive_folder_id": "canonical-folder-id",
                     "mounted_directory_verified": command == "verify",
+                    "mounted_payloads_verified": False,
                     "drive_contents_verified": command in {"verify", "retire"},
                 })
                 self.assertEqual(result["unresolved_files"], 1)

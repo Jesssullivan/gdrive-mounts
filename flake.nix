@@ -32,7 +32,7 @@
             # Every operator script becomes gdrive-mounts-<name>.
             for s in scripts/*.sh; do
               # Keep image dependencies out of ordinary HM mount installs.
-              case "$s" in scripts/photos.sh|scripts/test-photos.sh) continue ;; esac
+              case "$s" in scripts/photos.sh|scripts/test-photos.sh|scripts/test-maintenance.sh) continue ;; esac
               install -m0755 "$s" "$out/bin/gdrive-mounts-$(basename "$s" .sh)"
             done
 
@@ -56,7 +56,7 @@
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin $out/libexec/gdrive-mounts
-            install -m0644 scripts/gdrive_photos.py $out/libexec/gdrive-mounts/
+            install -m0644 scripts/gdrive_photos.py scripts/gftb_curation.py $out/libexec/gdrive-mounts/
             makeWrapper ${photoPython}/bin/python3 $out/bin/gdrive-mounts-photos \
               --add-flags "$out/libexec/gdrive-mounts/gdrive_photos.py" \
               --set PYTHONDONTWRITEBYTECODE 1 \
@@ -67,6 +67,13 @@
         };
 
         checks = {
+          maintenance = pkgs.runCommand "gdrive-mounts-maintenance-contracts"
+            { nativeBuildInputs = [ pkgs.python3 ]; }
+            ''
+              export PYTHONDONTWRITEBYTECODE=1
+              bash ${self}/scripts/test-maintenance.sh
+              touch $out
+            '';
           photos = pkgs.runCommand "gdrive-mounts-photo-contracts"
             { nativeBuildInputs = [ photoPython ]; }
             ''
