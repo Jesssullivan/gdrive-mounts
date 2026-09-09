@@ -552,3 +552,79 @@ qualification and the reviewed recovery/switch gates. Upload state remains
 unreconciled. No real mount, cache, photo, Drive object, sharing or credential
 was changed. Neither SWITCH READY nor GFTB COMPLETE is claimed; the proposed
 GFTB absolute path is not yet an authoritative live-data acceptance result.
+
+## Promotion review — 2026-09-09 UTC, September 8 Neo local date
+
+The operator explicitly authorized review, draft promotion and governed merges.
+`AGENTS.md` now distinguishes this source authority from live acceptance: the
+GFTB goal remains distinct originals plus accepted WebPs and portable curation
+at one verified Drive folder, with exact-manifest quarantine approval and final
+mounted/independent readback. Source merge does not close TIN-3883 or TIN-4000,
+authorize a force-unmount, or certify the actual Home Manager switch.
+
+Independent review found an index-lock startup race: another process could
+remove the first process's lock between `mkdir` and its PID write. The fix
+refuses every occupied/unavailable lock, including missing or stale markers.
+Cleanup removes only its matching owner marker and uses nonrecursive `rmdir`;
+abandoned-lock recovery requires stopped writers. The registered shell suite
+now has 40 passing assertions, including contention and replacement evidence.
+No further concrete photo preservation, curation, catalog-resume, retirement,
+packaging or registration blocker was found in the bounded review.
+
+The complete local `just check` passed after that fix: schema/render/rclone,
+40 shell assertions, 153 photo tests (151 passed, two ambient codec skips),
+18 maintenance tests, working-tree secret scan, endpoint doctrine, manifest,
+Home Manager drvPath evaluation and workflow validation. Full-history secret
+scanning also passed. Nix evaluation is not closure realization; this remains
+neither strict native-codec acceptance nor a full Bazel CI result.
+
+The one-shot GitHub read found gdrive PR #20's v4 action queued. The named
+personal-owner enrollment gap and accepted local gates in `docs/position.md`
+still apply; no runner fallback, owner change or policy relaxation was made.
+Exact-main rules require PRs/signatures and block deletion/force-push, with no
+required status contexts, no bypass actors and no auto-merge capability.
+Source promotion uses the documented local gate, not a claim that queued CI
+passed. Lab's separate merge queue and required checks are not bypassed.
+
+A newly provided clean detached checkout now exists at
+`/Users/jess/git/lab.worktrees/gdrive-closure-478e9067`, exactly signed candidate
+`478e9067ca578bbdfc986da0b7caecf0fa880627`. It was not created or modified by
+this lane. No inspected result link or receipt establishes its realized closure.
+The active generation and source remain `spv92312m7qv67vs0fd4qwb7w33ika93` and
+`3bdf581a`; deployed NFS settings remain timeo 100/retrans 5, watchdog threshold
+2/floor 900. The pinned Darwin photo interpreter remains absent.
+
+The candidate also inherits TCFS activation build hooks (`tummycrypt.nix:1242`)
+and conditional FileProvider build/application-launch paths (`:2032`). A realized
+Nix closure alone would not establish a compile-free, non-disruptive activation.
+Shared primary-lab workload-preservation edits are not in this candidate and
+were left untouched. Their omission is not permission to cherry-pick unrelated
+work or silently skip activation hooks.
+
+At admission, memory pressure was 1 but CPU was about 95 percent busy, only
+120 MiB was unused and about 6909.88 MiB of swap remained used. No heavy build,
+codec workload or real mount operation was admitted. One explicitly approved
+disposable launchd qualification ran, separately from recovery admission, on
+macOS 26.7/Darwin 25.6.0 with fixture source SHA256
+`dce6d4cce80804387cbcc8aabab4c92e1a6caaa49637bf16236e47e4a43bc0c6`.
+Its random label ended in `258329ee2b4c44898360685f44783114`. It failed at startup:
+`fixture did not start with a fresh heartbeat`. This is inconclusive, not proof
+of disable/no-respawn behavior. There was no automatic retry. The controller
+verified fixture unload, cleared its disabled override and removed its private
+files; the empty task-created scratch parent was then removed with `rmdir`.
+No real rclone/watchdog service was targeted. No buffered upload was discarded.
+
+Lab PR #1691's completed failure log identifies one failing test:
+`TestCurrentRegistryExactlyMatchesRootLock`, with `legacy asset count = 3,
+want 4`; the YAML target itself passed. A separately reviewed test-only repair
+removes that obsolete count while retaining exact lock/publication validation
+and testing all-legacy, mixed and fully governed registries plus malformed
+provenance refusals. The registered local Bazel wrapper refuses because neither
+remote cache nor executor is configured; no local-build override was used.
+Fresh remote checks, not that refusal, must establish test success before lab
+merges. No CI/build watcher or interim parallel-lab-agent message was started.
+
+Switch readiness remains unestablished: disposable qualification, complete
+upload reconciliation, exact closure/runtime and activation-side-effect review
+are outstanding. No real GFTB inventory or retirement occurred; the authoritative
+absolute path and deduplication completion remain live acceptance deliverables.

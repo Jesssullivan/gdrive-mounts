@@ -65,30 +65,33 @@ require_cmd rclone "run inside the flake: nix develop --command just index"
 mkdir_secure "$STATE_DIR"
 
 # ── one run at a time ───────────────────────────────────────────────────────
-# `mkdir` and not a `[ -f ]` test: creating a directory is atomic, so two
-# starts that race cannot both win. The pid inside is what makes a lock left by
-# a killed run recoverable rather than permanent.
+# `mkdir` and not a `[ -f ]` test: creating a directory is atomic. Every
+# occupied lock refuses, including a missing or stale owner marker: another
+# process may have won mkdir but not yet written its marker. Recovery is an
+# explicit operator action with index writers stopped, never an automatic
+# remove/recreate race in this script.
 LOCK="$STATE_DIR/index.lock"
 LOCK_HELD=0
-index_unlock() { [ "$LOCK_HELD" = 1 ] && rm -rf -- "$LOCK" 2>/dev/null; return 0; }
+LOCK_OWNER="$LOCK/owner.$$"
+index_unlock() {
+  [ "$LOCK_HELD" = 1 ] || return 0
+  LOCK_HELD=0
+  # Remove only this run's marker, then only an empty directory. Never erase
+  # another owner's replacement or recursively discard recovery evidence.
+  # Operators must not replace a live lock during cleanup: shell pathname
+  # operations cannot make an inode-conditional rmdir atomic.
+  [ ! -L "$LOCK" ] && [ ! -L "$LOCK_OWNER" ] && [ -f "$LOCK_OWNER" ] || return 0
+  [ "$(cat "$LOCK_OWNER" 2>/dev/null)" = "$$" ] || return 0
+  rm -- "$LOCK_OWNER" 2>/dev/null || return 0
+  rmdir -- "$LOCK" 2>/dev/null || true
+}
 
 if ! mkdir "$LOCK" 2>/dev/null; then
-  held="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  case "${held:-}" in "" | *[!0-9]*) held="" ;; esac
-  if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
-    # Not an error: the supervisor fired on schedule and the previous walk is
-    # still going. Exit 0 so launchd/systemd do not record a failure for
-    # behaving correctly.
-    info "an index run is already in flight (pid $held); standing down for this interval"
-    exit 0
-  fi
-  warn "clearing a stale index lock (pid ${held:-unreadable} is gone): $LOCK"
-  rm -rf -- "$LOCK" 2>/dev/null || true
-  mkdir "$LOCK" 2>/dev/null || die "could not take the index lock: $LOCK"
+  die "index lock is occupied or unavailable: $LOCK; do not replace a live lock; stopped-writer operator recovery is required for an abandoned lock"
 fi
 LOCK_HELD=1
 chmod 700 "$LOCK" 2>/dev/null || true
-printf '%s' "$$" > "$LOCK/pid"
+printf '%s' "$$" > "$LOCK_OWNER"
 trap 'index_unlock' EXIT
 trap 'index_unlock; exit 130' INT
 trap 'index_unlock; exit 143' TERM

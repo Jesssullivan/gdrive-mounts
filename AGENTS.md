@@ -46,6 +46,12 @@ target — see `docs/position.md`.
     or ambiguity; no forced-unmount or signal-to-rclone fallback. The parallel
     lab agent owns the ready direct local switch, not interim preparation.
     Permanent restart-policy and fleet hardening follow the Neo photo proof.
+11. Operator authorization on 2026-09-08 permits source review, draft promotion
+    and governed merges independently of live-data acceptance. Do not bypass
+    required checks or the accepted local gates in `docs/position.md`, weaken
+    protection or close TIN-3883/TIN-4000 on source merge alone. The direct
+    switch still requires exact closure and
+    recovery/upload-safety proof; retirement still needs its exact manifest.
 
 ## Where each fact lives
 

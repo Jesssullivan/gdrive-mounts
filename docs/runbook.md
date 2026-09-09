@@ -514,17 +514,20 @@ say a run had failed and nothing on the host could say why.
 `index.intervalSec` is a fixed *period* (launchd `StartInterval`, systemd
 `OnUnitActiveSec`), not a gap between runs, and a full-tree
 `lsjson -R --fast-list` measured 4h40m to 8h44m on neo against a 6h interval —
-so the schedule overlapped itself. A start that finds a live run now stands
-down with
+so the schedule overlapped itself. A start that finds any occupied or
+unavailable lock now refuses with
 
 ```
-gdrive-index: an index run is already in flight (pid NNNN); standing down for this interval
+gdrive-index: index lock is occupied or unavailable: ...
 ```
 
-and exits 0, because behaving correctly must not be recorded as a unit
-failure. The lock is `<indexStateDir>/index.lock/` (a directory: `mkdir` is
-atomic) holding the owner's pid; a lock whose pid is gone is cleared with a
-warning on the next start.
+and exits nonzero before indexing. The lock is `<indexStateDir>/index.lock/`;
+atomic `mkdir` grants ownership, and `owner.<pid>` identifies the successful
+run. A missing, unreadable or stale marker is not permission to remove the
+lock: the owner may still be between directory creation and marker creation.
+Abandoned locks require explicit recovery with index writers stopped. Never
+replace a live lock. Cleanup removes only the current run's matching marker,
+then attempts to remove the empty directory, without recursive deletion.
 
 ## Common failures
 
