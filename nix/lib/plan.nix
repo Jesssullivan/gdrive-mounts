@@ -1003,6 +1003,7 @@ in
     mountArgs
     renderPlan
     shellPreamble
+    darwinStartupAdmission
     cacheGuard
     watchdogShell
     ;
