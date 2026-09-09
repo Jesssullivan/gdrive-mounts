@@ -1180,7 +1180,8 @@ if failures != [ ] then
   throw "hm-eval failed: ${lib.concatStringsSep ", " failures}"
 else
   pkgs.runCommand "gdrive-mounts-hm-eval" { } ''
-    set -eu
+    set -Eeu
+    trap 'rc=$?; printf "hm-eval: line %s failed: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; exit "$rc"' ERR
 
     # Every negative assertion in this builder goes through `no`, because the
     # obvious spelling does not work: bash exempts a pipeline whose exit status
@@ -1281,7 +1282,8 @@ else
     grep -qF 'date -u +%Y-%m-%dT%H:%M:%SZ' "$dsul"
     grep -q 'gdm_log "start:' "$dsul"
     grep -q 'gdm_log "guard:' "$dsul"
-    grep -q 'gdm_log "sweep:' "$dsul"
+    grep -q 'existing mount preserved; reviewed non-forcing recovery required' "$dsul"
+    grep -q 'gdm_log "sweep:' "$lsul"
     grep -q 'gdm_log "render:' "$dsul"
     grep -q 'gdm_log exec: rclone' "$dsul"
     grep -q 'gdm_log "start:' "$lsul"
