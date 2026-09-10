@@ -137,6 +137,34 @@ class LocalMount(photos.MountedIO):
         return self
 
 
+class MountedAdmissionTests(unittest.TestCase):
+    def test_darwin_nfsstat_system_path_and_soft_admission(self):
+        point = Path("/synthetic/mount")
+        mount = photos.MountedIO(point)
+        with mock.patch.object(mount, "table", return_value="synthetic-nfs"), \
+                mock.patch.object(photos.subprocess, "run", return_value=mock.Mock(
+                    stdout=f"{point}\nsoft,intr\n\n")) as run, \
+                mock.patch.object(photos.os, "open", side_effect=RuntimeError("admission passed")) as opened:
+            with self.assertRaisesRegex(RuntimeError, "admission passed"):
+                mount.__enter__()
+            run.assert_called_once_with(["/usr/bin/nfsstat", "-m"], capture_output=True,
+                                        text=True, check=True, timeout=10)
+            opened.assert_called_once_with(point, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+    def test_unsafe_nfs_options_refuse_before_open(self):
+        point = Path("/synthetic/mount")
+        for options in ("hard,intr", "soft,nointr", "soft,intr,not responding"):
+            with self.subTest(options=options):
+                mount = photos.MountedIO(point)
+                with mock.patch.object(mount, "table", return_value="synthetic-nfs"), \
+                        mock.patch.object(photos.subprocess, "run", return_value=mock.Mock(
+                            stdout=f"{point}\n{options}\n\n")), \
+                        mock.patch.object(photos.os, "open") as opened:
+                    with self.assertRaisesRegex(photos.Refusal, "soft semantics"):
+                        mount.__enter__()
+                    opened.assert_not_called()
+
+
 class PhotosTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="gdm-photos-fixture-")

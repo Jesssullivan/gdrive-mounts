@@ -683,3 +683,33 @@ every observed fixture PID, including one first seen during cleanup or without
 a heartbeat, before removing private files. This final source was not subjected
 to another launchd experiment. Full native-codec and live-data acceptance remain
 separate from these source gates.
+
+## Post-switch GFTB admission — 2026-09-10 UTC
+
+The operator reports Neo and PZM switched and ratifies a fresh GFTB-first goal:
+one hour is a scope guide, followed by evidence-based workstream closeout.
+Neo's installed receipt now reports generation 26 and source
+`6c9c9f493038404051c67a3fed0af1b27e9035dc`. This supersedes the earlier
+generation-25 observations, not the outstanding photo acceptance requirements.
+
+One bounded live `vfs/stats` request succeeded: queued uploads, uploads in
+progress and errored files were all zero; `outOfSpace` was false. The exact
+Sulliwood mount is NFS with negotiated `soft,intr` and status flags zero.
+TinylandSSD UUID remains `E3131481-8D53-4688-B20A-E1F71DC0C61E`, with ample
+reported capacity. Competing-writer pause was requested afresh; the previous
+day's attestation is not silently treated as today's confirmation.
+
+No default private photo state directory exists, and no photo plan digest is
+recorded in the tracked receipts. The photo package is absent from PATH; the
+historically pinned Python environment is absent, and ambient Python lacks
+Pillow. A source-only Nix evaluation was interrupted without realization when
+admission worsened: memory pressure returned to warning (2), with 4532 MiB
+swap used. No corpus hashing, codec execution, mount write, retirement or
+service recovery was performed.
+
+Native inspection also found a real photo verification defect: `nfsstat` is
+`/usr/bin/nfsstat` on this Neo, while the CLI called nonexistent
+`/usr/sbin/nfsstat`. The adjacent fix corrects the native path and adds a
+synthetic mount-entry regression. It does not weaken negotiated-NFS checks.
+GFTB authoritative-path, Drive-ID/hash, retirement and mounted-readback
+acceptance remain unproved.

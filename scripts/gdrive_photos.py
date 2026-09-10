@@ -464,7 +464,7 @@ class MountedIO:
 
     def __enter__(self):
         self.table_line = self.table()
-        nfs = subprocess.run(["/usr/sbin/nfsstat", "-m"], capture_output=True,
+        nfs = subprocess.run(["/usr/bin/nfsstat", "-m"], capture_output=True,
                              text=True, check=True, timeout=10).stdout
         section = nfs.split(str(self.point), 1)
         if len(section) != 2:
