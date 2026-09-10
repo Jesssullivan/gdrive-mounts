@@ -90,8 +90,14 @@ class RemoteAdapterTests(unittest.TestCase):
         self.assertEqual(self.remote.children("a'b\\c"), [self.row])
         self.assertEqual(self.command()[4], "'a\\'b\\\\c' in parents and trashed = false")
 
-    def test_query_rejects_non_list_response(self):
-        for value in ({"files": [self.row]}, None, "unexpected"):
+    def test_empty_query_children_accept_null_or_empty_list(self):
+        for value in (None, []):
+            with self.subTest(value=value):
+                self.respond(value)
+                self.assertEqual(self.remote.children("empty-parent"), [])
+
+    def test_query_rejects_other_non_list_responses(self):
+        for value in ({"files": [self.row]}, "unexpected", 0, False):
             with self.subTest(value=value):
                 self.respond(value)
                 with self.assertRaisesRegex(photos.Refusal, "unexpected Drive query"):
@@ -105,7 +111,7 @@ class RemoteAdapterTests(unittest.TestCase):
         self.assertIn("name = 'GFTB Stuff'", query)
         self.assertIn("mimeType = 'application/vnd.google-apps.folder'", query)
         self.assertIn("trashed = false", query)
-        for rows in ([], [self.root, {**self.root, "id": "another-root"}]):
+        for rows in (None, [], [self.root, {**self.root, "id": "another-root"}]):
             with self.subTest(rows=rows):
                 self.respond(rows)
                 with self.assertRaisesRegex(photos.Refusal, "missing or ambiguous"):
