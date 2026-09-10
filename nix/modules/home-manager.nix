@@ -335,7 +335,10 @@ let
             SuccessfulExit = false;
           };
           ThrottleInterval = 30;
-          ProcessType = "Background";
+          # NFS requests synchronously block user applications. rclone serves
+          # sockets, not XPC transactions, so Adaptive cannot promote it when
+          # those callers need I/O. Keep bulk indexing and supervision separate.
+          ProcessType = if backend == "nfsmount" then "Interactive" else "Background";
           EnvironmentVariables = {
             PATH = runtimePath;
           };
