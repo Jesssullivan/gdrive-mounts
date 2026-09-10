@@ -823,3 +823,29 @@ NFS, and zero queued, active or errored uploads. SSD UUID remained
 `E3131481-8D53-4688-B20A-E1F71DC0C61E`. This snapshot is not a future upload
 drainage guarantee or completed photo-workload acceptance. Live adoption,
 publication, approved retirement and final readback remain separate receipts.
+
+### Complete private visual review and explicit correction — 2026-09-10
+
+Preparation completed successfully for all 136 missing derivatives. Two
+independent visual reviewers inspected nine hash-bound contact sheets: 135
+outputs retain the prepared orientation; one identification-label image needs
+an additional 180-degree turn. The new `prepare-correction` command generated
+that correction from the preserved original with the pinned recipe, retaining
+the old preview and immutable plan. Both reviewers inspected the actual
+corrected bytes and found the label upright with no new clipping. Historical
+rotation, selection and restriction documents remain unchanged.
+
+Private collection acceptance is bound by immutable decision digest
+`14ed7e1d89ee249d9cde893b5b35d86b22b9f2ab9a6f03beba01e22612d44d4b`.
+It covers all 136 derivatives and 12 hashed evidence artifacts, including the
+corrected image and its independent review. The corrected WebP SHA256 is
+`46b3d1dd66a5e6c2c0d74415c7c791a17555affd1f59bb6615ccc19e17b8a630`.
+This is not public-sharing consent, a design selection or retirement approval.
+
+Independent correction-source review found no blocking defect. The registered
+`just check` passed with 187 native photo tests, zero skips, 49 maintenance
+tests, 40 shell assertions and all other registered gates. An initial run
+passed photo tests but hit three five-second startup timeouts in maintenance
+fixtures using the ambient profile Python. The successful run used the pinned
+native Python consistently in PATH; no test limit or assertion was relaxed.
+Live SSD adoption and Drive publication are not claimed by this receipt.

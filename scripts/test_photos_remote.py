@@ -1008,6 +1008,98 @@ class PrivateReviewTests(unittest.TestCase):
                 with self.assertRaises(photos.Refusal):
                     photos.assert_review_ssd()
 
+    def correct(self, angle=180):
+        return photos.prepare_correction(self.plan, self.key, self.state, self.remote, self.webp["key"], angle)
+
+    def test_correction_refuses_bad_angle_identity_or_bytes_before_write(self):
+        self.adoption_fixture()
+        directory = self.state.root / f"review-{self.key}" / self.webp["key"]
+        with mock.patch.object(photos, "convert") as convert:
+            for angle in (0, 45, True, "180"):
+                with self.subTest(angle=angle), self.assertRaises(photos.Refusal):
+                    self.correct(angle)
+            self.original["keep_id"] = "wrong"
+            with self.assertRaises(photos.Refusal):
+                self.correct()
+            self.original["keep_id"] = self.row["id"]
+            source = directory / "original"
+            source.chmod(0o600)
+            source.write_bytes(b"bad")
+            with self.assertRaises(photos.Refusal):
+                self.correct()
+            convert.assert_not_called()
+        self.assertFalse((directory / "correction-180").exists())
+
+    def test_correction_prepares_unaccepted_original_based_bytes_and_resumes(self):
+        self.adoption_fixture()
+        before = photos.canonical(self.plan)
+        directory = self.state.root / f"review-{self.key}" / self.webp["key"]
+        def corrected(source, output, *, clockwise_degrees):
+            self.assertEqual(source.read_bytes(), b"abc")
+            self.assertEqual(clockwise_degrees, 180)
+            output.write_bytes(b"corrected")
+        with mock.patch.object(photos, "convert", side_effect=corrected) as convert, \
+                mock.patch.object(photos, "validate_webp", self.validator):
+            result = self.correct()
+            self.assertEqual(self.correct(), result)
+            convert.assert_called_once()
+        self.assertFalse(result["accepted"])
+        self.assertFalse(result["publication_authorized"])
+        self.assertEqual((directory / "preview.webp").read_bytes(), b"preview")
+        self.assertEqual((directory / "original").read_bytes(), b"abc")
+        self.assertEqual(photos.canonical(self.plan), before)
+
+    def test_correction_unowned_target_is_never_overwritten(self):
+        self.adoption_fixture()
+        target = self.state.root / f"review-{self.key}" / self.webp["key"] / "correction-180"
+        target.symlink_to(self.state.root, target_is_directory=True)
+        with mock.patch.object(photos, "convert") as convert:
+            with self.assertRaises(photos.Refusal):
+                self.correct()
+            convert.assert_not_called()
+        self.assertTrue(target.is_symlink())
+
+    def test_reviewed_adoption_requires_exact_corrected_hash(self):
+        corpus, decision = self.adoption_fixture()
+        with mock.patch.object(photos, "convert", side_effect=lambda source, output, **kw: output.write_bytes(b"corrected")), \
+                mock.patch.object(photos, "validate_webp", self.validator):
+            result = self.correct()
+        decision["entries"][0].update(orientation_degrees=180, accepted_preview_sha256="0" * 64)
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+        decision["entries"][0]["accepted_preview_sha256"] = result["corrected_preview_sha256"]
+        self.assertEqual(self.adopt(corpus, decision)["staged_files"], 2)
+        self.assertEqual((corpus / "webp/a.webp").read_bytes(), b"corrected")
+
+    def test_correction_native_180_uses_original_pixels(self):
+        try:
+            from PIL import Image
+            import pillow_heif  # noqa: F401
+        except ImportError:
+            if photos.os.environ.get("GDM_PHOTOS_REQUIRE_CODECS") == "1":
+                self.fail("required native correction codecs unavailable")
+            self.skipTest("optional ambient codecs unavailable")
+        image = Image.new("RGB", (64, 32), "red")
+        image.paste("blue", (32, 0, 64, 32))
+        encoded = io.BytesIO()
+        image.save(encoded, format="PNG")
+        data = encoded.getvalue()
+        self.sha = hashlib.sha256(data).hexdigest()
+        self.row.update(size=str(len(data)), md5Checksum=hashlib.md5(data).hexdigest())
+        self.original["sha256"] = self.sha
+        self.webp["recipe"]["source_original_sha256"] = self.sha
+        self.remote.download.side_effect = lambda row, target: target.write_bytes(data)
+        self.encoder, self.validator = photos.convert, photos.validate_webp
+        self.adoption_fixture()
+        result = self.correct()
+        with Image.open(result["corrected_preview"]) as corrected:
+            self.assertEqual(corrected.size, (64, 32))
+            left, right = corrected.getpixel((8, 16)), corrected.getpixel((56, 16))
+            self.assertGreater(left[2], left[0] + 150)
+            self.assertGreater(right[0], right[2] + 150)
+        directory = self.state.root / f"review-{self.key}" / self.webp["key"]
+        self.assertEqual((directory / "original").read_bytes(), data)
+
     def test_private_review_prepares_unaccepted_bytes_and_resumes_without_reencoding(self):
         before = photos.canonical(self.plan)
         result = self.prepare()

@@ -137,10 +137,19 @@ PLAN_SHA256 --review-digest REVIEW_SHA256` stages the reviewed originals and
 unchanged previews into paired SSD `originals/` and `webp/` paths. The private
 read-only `review-REVIEW_SHA256.json` decision covers every missing derivative
 and binds its source Drive ID, original and preview hashes, and independent
-review evidence. This phase supports only reviewed zero-additional-rotation
-previews; it refuses ambiguous or incomplete review and never replays old
-rotation notes. Acceptance here is for the private collection, not public
+review evidence. It refuses ambiguous or incomplete review and never replays
+old rotation notes. Acceptance here is for the private collection, not public
 sharing, design selection or a change to publication restrictions.
+
+If actual visual review identifies a quarter-turn correction, use
+`just photos prepare-correction PLAN_SHA256 --entry-key ENTRY_SHA256
+--clockwise-degrees 180` with the explicitly reviewed angle (90, 180 or 270).
+The angle is additional clockwise rotation after decoding the original's
+orientation, not a historical CSV instruction. This regenerates from the
+preserved original using the pinned recipe, not from a lossy WebP preview.
+The base preview remains unchanged; corrected bytes occupy a separate private
+no-overwrite directory and remain unaccepted. Inspect those actual corrected
+bytes before adding their hash and angle to the immutable adoption decision.
 
 Adoption checks the SSD UUID, anchored paths, original plan identity, source
 Drive fingerprints and unchanged curation. It uses journal-owned temporary

@@ -715,12 +715,18 @@ def validate_webp(path):
         return {"width": im.width, "height": im.height}
 
 
-def convert(source, destination):
+def convert(source, destination, *, clockwise_degrees=0):
+    if type(clockwise_degrees) is not int or clockwise_degrees not in (0, 90, 180, 270):
+        raise Refusal("unsupported explicit clockwise correction")
     from PIL import Image, ImageOps
     import pillow_heif
     pillow_heif.register_heif_opener()
     with Image.open(source) as image:
         image = ImageOps.exif_transpose(image)
+        if clockwise_degrees:
+            image = image.transpose({90: Image.Transpose.ROTATE_270,
+                                     180: Image.Transpose.ROTATE_180,
+                                     270: Image.Transpose.ROTATE_90}[clockwise_degrees])
         image.thumbnail((RECIPE["long_edge"], RECIPE["long_edge"]), Image.Resampling.LANCZOS)
         image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
         image.save(destination, "WEBP", quality=RECIPE["quality"], method=RECIPE["method"])
@@ -1787,6 +1793,92 @@ def prepare_review(plan, key, state, remote, encoder=convert, validator=validate
             "accepted": False, "publication_authorized": False}
 
 
+def prepare_correction(plan, key, state, remote, entry_key, clockwise_degrees):
+    """Prepare another unaccepted preview from original pixels, never old WebP."""
+    if (not isinstance(entry_key, str) or not re.fullmatch(r"[a-f0-9]{64}", entry_key)
+            or not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key)
+            or type(clockwise_degrees) is not int or clockwise_degrees not in (90, 180, 270)):
+        raise Refusal("correction requires exact entry identity and explicit clockwise angle")
+    validate_alias_bindings(plan)
+    entries = {entry["key"]: entry for entry in plan["entries"]}
+    entry = entries.get(entry_key)
+    if (len(entries) != len(plan["entries"]) or entry is None or entry["kind"] != "webp"
+            or entry["recipe"].get("operation") != "encode-original"
+            or entry["sha256"] is not None or entry["keep_id"] is not None):
+        raise Refusal("correction requires a missing, unaccepted derivative")
+    original = entries[entry["original_key"]]
+    row = original["source"]["remote"]
+    records = [r for r in state.events(key) if r.get("event") == "review-prepared" and r.get("entry") == entry_key]
+    if (len(records) != 1 or not isinstance(row, dict) or row not in plan["remote_inventory"]
+            or row["id"] != original["keep_id"] or original["kind"] != "original"
+            or entry["recipe"] != {**RECIPE, "operation": "encode-original",
+                                  "source_original_sha256": original["sha256"], "codec_versions": codec_versions()}):
+        raise Refusal("correction source identity or pinned recipe differs")
+    base = records[0]
+    if (base.get("accepted") is not False or base.get("publication_authorized") is not False
+            or base.get("source_id") != row["id"] or base.get("source_sha256") != original["sha256"]
+            or base.get("original_key") != original["key"] or base.get("recipe") != entry["recipe"]):
+        raise Refusal("correction base provenance differs")
+    directory = state.root / f"review-{key}" / entry_key
+    if not directory.is_dir():
+        raise Refusal("prepared private review is missing")
+    private_dir(directory)
+    source, preview = directory / "original", directory / "preview.webp"
+    if (hash_file(source)["sha256"] != original["sha256"] or source.stat().st_size != int(row["size"])
+            or hash_file(preview)["sha256"] != base["preview_sha256"]):
+        raise Refusal("correction original or base preview changed")
+    remote.current(row)
+    if remote.root_folder() != plan["drive_root_id"]:
+        raise Refusal("correction Drive root differs")
+    recipe = {**entry["recipe"], "additional_clockwise_degrees": clockwise_degrees}
+    records = [r for r in state.events(key) if r.get("event") == "review-correction-prepared"
+               and r.get("entry") == entry_key and r.get("orientation_degrees") == clockwise_degrees]
+    target_dir = directory / f"correction-{clockwise_degrees}"
+    corrected = target_dir / "preview.webp"
+    if records:
+        if len(records) != 1:
+            raise Refusal("correction journal is ambiguous")
+        private_dir(target_dir)
+        record = records[0]
+        if (record.get("accepted") is not False or record.get("publication_authorized") is not False
+                or record.get("recipe") != recipe or record.get("source_id") != row["id"]
+                or record.get("source_sha256") != original["sha256"]
+                or record.get("base_preview_sha256") != base["preview_sha256"]
+                or hash_file(corrected)["sha256"] != record.get("corrected_preview_sha256")):
+            raise Refusal("correction bytes or provenance changed")
+        validate_webp(corrected)
+        corrected_sha = record["corrected_preview_sha256"]
+    else:
+        if target_dir.exists() or target_dir.is_symlink():
+            raise Refusal("unowned correction directory exists")
+        with tempfile.TemporaryDirectory(prefix="correction-attempt-", dir=directory) as temporary:
+            output = Path(temporary) / "preview.webp"
+            convert(source, output, clockwise_degrees=clockwise_degrees)
+            corrected_sha = hash_file(output)["sha256"]
+            dimensions = validate_webp(output)
+            if (hash_file(source)["sha256"] != original["sha256"]
+                    or hash_file(preview)["sha256"] != base["preview_sha256"]):
+                raise Refusal("correction changed preserved inputs")
+            fd = os.open(output, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fchmod(fd, 0o400)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                rename_noreplace(Path(temporary).name, target_dir.name, parent, parent)
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        state.event(key, "review-correction-prepared", entry=entry_key, source_id=row["id"],
+                    source_sha256=original["sha256"], base_preview_sha256=base["preview_sha256"],
+                    corrected_preview_sha256=corrected_sha, orientation_degrees=clockwise_degrees,
+                    recipe=recipe, dimensions=dimensions, accepted=False, publication_authorized=False)
+    return {"entry": entry_key, "corrected_preview": str(corrected), "corrected_preview_sha256": corrected_sha,
+            "orientation_degrees": clockwise_degrees, "accepted": False, "publication_authorized": False}
+
+
 def review_decisions(state, review_digest):
     if not isinstance(review_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", review_digest):
         raise Refusal("review requires its full immutable digest")
@@ -1856,12 +1948,12 @@ def adopt_reviewed(plan, key, state, remote, review_digest):
         original = entries[entry["original_key"]]
         records = [r for r in prepared if r.get("entry") == entry["key"]]
         reviewers = decision.get("reviewers")
-        if (len(records) != 1 or decision.get("orientation_degrees") != 0
+        if (len(records) != 1 or decision.get("orientation_degrees") not in (0, 90, 180, 270)
                 or type(decision.get("orientation_degrees")) is not int
                 or not isinstance(reviewers, list) or len(reviewers) < 2
                 or any(not isinstance(r, str) or not r.strip() for r in reviewers)
                 or len(set(reviewers)) != len(reviewers)):
-            raise Refusal("review lacks independent completed zero-rotation decisions")
+            raise Refusal("review lacks independent completed orientation decisions")
         record = records[0]
         evidence_hashes = decision.get("evidence_sha256")
         if (not isinstance(evidence_hashes, list) or not evidence_hashes
@@ -1884,11 +1976,33 @@ def adopt_reviewed(plan, key, state, remote, review_digest):
                 or hash_file(preview)["sha256"] != record["preview_sha256"]):
             raise Refusal("reviewed bytes changed")
         validate_webp(preview)
+        accepted_sha = record["preview_sha256"]
+        angle = decision["orientation_degrees"]
+        if angle:
+            corrections = [r for r in state.events(key) if r.get("event") == "review-correction-prepared"
+                           and r.get("entry") == entry["key"] and r.get("orientation_degrees") == angle]
+            if len(corrections) != 1:
+                raise Refusal("review correction evidence is missing or ambiguous")
+            correction = corrections[0]
+            accepted_sha = decision.get("accepted_preview_sha256")
+            if (correction.get("accepted") is not False or correction.get("publication_authorized") is not False
+                    or correction.get("source_id") != row["id"] or correction.get("source_sha256") != original["sha256"]
+                    or correction.get("base_preview_sha256") != record["preview_sha256"]
+                    or correction.get("corrected_preview_sha256") != accepted_sha
+                    or correction.get("recipe") != {**entry["recipe"], "additional_clockwise_degrees": angle}):
+                raise Refusal("review corrected output differs from accepted evidence")
+            correction_dir = private_dir(directory / f"correction-{angle}")
+            preview = correction_dir / "preview.webp"
+            if hash_file(preview)["sha256"] != accepted_sha:
+                raise Refusal("review corrected bytes changed")
+            validate_webp(preview)
+        elif decision.get("accepted_preview_sha256", accepted_sha) != accepted_sha:
+            raise Refusal("zero-rotation decision cannot substitute another preview")
         remote.current(row)
         original_path = relative(original["path"])
         for destination, payload, sha in (
                 (str(PurePosixPath("originals") / original_path), source, original["sha256"]),
-                (str(PurePosixPath("webp") / original_path.with_suffix(".webp")), preview, record["preview_sha256"])):
+                (str(PurePosixPath("webp") / original_path.with_suffix(".webp")), preview, accepted_sha)):
             if destination.casefold() in paths or destination.casefold() in {p.casefold() for p in plan["local"]}:
                 raise Refusal("review adoption destination collides with existing collection")
             paths.add(destination.casefold())
@@ -1997,10 +2111,12 @@ def _stage_reviewed_file(key, state, review_digest, root_fd, destination, payloa
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "apply", "verify", "retire", "prepare-review", "adopt-reviewed"))
+    parser.add_argument("command", choices=("plan", "apply", "verify", "retire", "prepare-review", "prepare-correction", "adopt-reviewed"))
     parser.add_argument("plan_digest", nargs="?")
     parser.add_argument("--approve-digest", help="explicit exact-manifest approval for recoverable retirement")
     parser.add_argument("--review-digest", help="immutable private collection review decision digest")
+    parser.add_argument("--entry-key", help="exact missing-derivative key for private correction")
+    parser.add_argument("--clockwise-degrees", type=int, help="explicit additional clockwise rotation")
     parser.add_argument("--settings", default=str(Path.home() / ".local/state/gdrive-mounts/effective-settings.json"))
     parser.add_argument("--state-dir")
     parser.add_argument("--mounted-readback", action="store_true",
@@ -2029,6 +2145,8 @@ def main(argv=None):
                     raise Refusal("plan roots do not match the explicit corpus and effective mount")
                 if args.command == "prepare-review":
                     result = prepare_review(plan, key, state, remote)
+                elif args.command == "prepare-correction":
+                    result = prepare_correction(plan, key, state, remote, args.entry_key, args.clockwise_degrees)
                 elif args.command == "adopt-reviewed":
                     result = adopt_reviewed(plan, key, state, remote, args.review_digest)
                 elif args.command == "apply":
