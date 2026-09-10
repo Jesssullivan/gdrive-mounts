@@ -1691,9 +1691,104 @@ def verified_location(plan, key, state, remote, mount, *, mounted_readback=False
     return len(verified)
 
 
+def prepare_review(plan, key, state, remote, encoder=convert, validator=validate_webp):
+    """Prepare private, unaccepted previews; never publish or modify the plan."""
+    validate_alias_bindings(plan)
+    entries = {entry["key"]: entry for entry in plan["entries"]}
+    selected = [entry for entry in plan["entries"] if entry["kind"] == "webp"
+                and entry["recipe"]["operation"] == "encode-original"]
+    if (len(entries) != len(plan["entries"]) or len(selected) > MAX_FILES
+            or not re.fullmatch(r"[a-f0-9]{64}", key)
+            or any(not re.fullmatch(r"[a-f0-9]{64}", entry_key) for entry_key in entries)):
+        raise Refusal("review entry budget or identity is invalid")
+    versions, work, total = codec_versions(), [], 0
+    for entry in selected:
+        original = entries.get(entry.get("original_key"))
+        recipe = entry["recipe"]
+        if (original is None or original["kind"] != "original" or entry["sha256"] is not None
+                or entry["keep_id"] is not None or recipe != {**RECIPE, "operation": "encode-original",
+                    "source_original_sha256": original["sha256"], "codec_versions": versions}):
+            raise Refusal("review original linkage or pinned recipe differs")
+        row = original["source"].get("remote")
+        if (not isinstance(row, dict) or row not in plan["remote_inventory"]
+                or row["id"] != original["keep_id"]):
+            raise Refusal("review requires an exact inventoried Drive source ID")
+        size = row.get("size")
+        if not isinstance(size, str) or not re.fullmatch(r"[0-9]+", size):
+            raise Refusal("review source byte length is unavailable")
+        total += int(size)
+        if total > MAX_BYTES:
+            raise Refusal("review exceeds source byte budget")
+        work.append((entry, original, row, int(size)))
+    if remote.root_folder() != plan["drive_root_id"]:
+        raise Refusal("review Drive root identity changed")
+    review = private_dir(state.root / f"review-{key}")
+    events = [event for event in state.events(key) if event.get("event") == "review-prepared"]
+    for entry, original, row, size in work:
+        directory = review / entry["key"]
+        source = directory / "original"
+        preview = directory / "preview.webp"
+        records = [event for event in events if event.get("entry") == entry["key"]]
+        if records:
+            remote.current(row)
+            if len(records) != 1:
+                raise Refusal("review journal ownership is ambiguous")
+            private_dir(directory)
+            record = records[0]
+            if (record.get("accepted") is not False or record.get("publication_authorized") is not False
+                    or record.get("source_id") != row["id"] or record.get("original_key") != original["key"]
+                    or record.get("recipe") != entry["recipe"] or record.get("source_sha256") != original["sha256"]
+                    or hash_file(source)["sha256"] != record["source_sha256"]
+                    or hash_file(preview)["sha256"] != record["preview_sha256"]
+                    or source.stat().st_size != size):
+                raise Refusal("private review bytes or provenance changed")
+            validator(preview)
+            continue
+        # An interrupted or unowned directory is preserved and refused, not adopted.
+        if directory.exists() or directory.is_symlink():
+            raise Refusal("unowned private review target exists")
+        for attempt in range(2):
+            with tempfile.TemporaryDirectory(prefix="review-attempt-", dir=review) as temporary:
+                source, preview = Path(temporary) / "original", Path(temporary) / "preview.webp"
+                try:
+                    remote.download(row, source)
+                except RemoteFailure as error:
+                    if error.returncode == 5 and attempt == 0:
+                        continue
+                    raise
+                if hash_file(source)["sha256"] != original["sha256"] or source.stat().st_size != size:
+                    raise Refusal("review original differs from planned bytes")
+                encoder(source, preview)
+                preview_sha = hash_file(preview)["sha256"]
+                dimensions = validator(preview)
+                if hash_file(source)["sha256"] != original["sha256"]:
+                    raise Refusal("review encoder changed original bytes")
+                for path in (source, preview):
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        os.fchmod(fd, 0o400)
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                review_fd = os.open(review, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    rename_noreplace(Path(temporary).name, directory.name, review_fd, review_fd)
+                    os.fsync(review_fd)
+                finally:
+                    os.close(review_fd)
+                break
+        state.event(key, "review-prepared", entry=entry["key"], original_key=original["key"],
+                    source_id=row["id"], source_sha256=original["sha256"],
+                    preview_sha256=preview_sha, recipe=entry["recipe"],
+                    dimensions=dimensions, accepted=False, publication_authorized=False)
+    return {"prepared": len(work), "review_directory": str(review),
+            "private_index": str(state.root / f"journal-{key}.jsonl"),
+            "accepted": False, "publication_authorized": False}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "apply", "verify", "retire"))
+    parser.add_argument("command", choices=("plan", "apply", "verify", "retire", "prepare-review"))
     parser.add_argument("plan_digest", nargs="?")
     parser.add_argument("--approve-digest", help="explicit exact-manifest approval for recoverable retirement")
     parser.add_argument("--settings", default=str(Path.home() / ".local/state/gdrive-mounts/effective-settings.json"))
@@ -1722,7 +1817,9 @@ def main(argv=None):
                 key, plan = args.plan_digest, state.load(args.plan_digest)
                 if plan["source_root"] != str(SSD_ROOT) or plan["mount_point"] != str(point):
                     raise Refusal("plan roots do not match the explicit corpus and effective mount")
-                if args.command == "apply":
+                if args.command == "prepare-review":
+                    result = prepare_review(plan, key, state, remote)
+                elif args.command == "apply":
                     result = {"entries": apply_plan(plan, key, state, remote, MountedIO(point))}
                 elif args.command == "verify":
                     result = {"verified": verified_location(plan, key, state, remote, MountedIO(point),
