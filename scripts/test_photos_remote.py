@@ -72,8 +72,25 @@ class RemoteAdapterTests(unittest.TestCase):
         self.process.side_effect = [subprocess.CompletedProcess([], 19, marker.encode(), marker.encode())]
         with self.assertRaises(photos.Refusal) as caught:
             self.remote.run("backend", "query", marker)
-        self.assertEqual(str(caught.exception), "rclone backend failed with exit 19")
+        self.assertEqual(str(caught.exception), "rclone backend query failed with exit 19")
         self.assertNotIn(marker, str(caught.exception))
+
+    def test_failed_command_labels_only_allowlisted_operations(self):
+        marker = "SYNTHETIC-PRIVATE-DIAGNOSTIC"
+        for args, label in (
+            (("backend", "copyid", marker, marker, marker), "backend copyid"),
+            (("backend", "moveid", marker, marker, marker), "backend moveid"),
+            (("backend", marker, marker), "backend"),
+            (("rc", marker), "rc"),
+            (("mkdir", marker), "mkdir"),
+            ((marker,), "operation"),
+        ):
+            with self.subTest(label=label):
+                self.process.side_effect = [subprocess.CompletedProcess([], 5, marker.encode(), marker.encode())]
+                with self.assertRaises(photos.Refusal) as caught:
+                    self.remote.run(*args)
+                self.assertEqual(str(caught.exception), f"rclone {label} failed with exit 5")
+                self.assertNotIn(marker, str(caught.exception))
 
     def test_timeout_does_not_echo_partial_output_or_command(self):
         marker = "SYNTHETIC-PRIVATE-DIAGNOSTIC"
@@ -200,13 +217,30 @@ class RemoteAdapterTests(unittest.TestCase):
     def test_sha256_requires_download_even_with_an_advertised_hash(self):
         row = {**self.row, "sha256Checksum": "0" * 64}
         measured = hashlib.sha256(b"synthetic independent readback").hexdigest()
-        self.respond([row], [row], None, [row])
+        self.respond([row], None, [row])
         with mock.patch.object(photos.tempfile, "TemporaryDirectory") as temporary:
             temporary.return_value.__enter__.return_value = "/synthetic/readback"
             with mock.patch.object(photos, "hash_file", return_value={"sha256": measured}) as hasher:
                 self.assertEqual(self.remote.sha256(row), measured)
                 hasher.assert_called_once_with(Path("/synthetic/readback/object"))
-        self.assertEqual(self.command(2)[2:5], ["copyid", "gdrive-sulliwood:", "file-one"])
+        self.assertEqual(self.process.call_count, 3)
+        self.assertEqual(self.command(0)[1:3], ["backend", "query"])
+        self.assertEqual(self.command(1)[2:5], ["copyid", "gdrive-sulliwood:", "file-one"])
+        self.assertEqual(self.command(2)[1:3], ["backend", "query"])
+
+    def test_sha256_never_hashes_after_failed_fingerprint_check(self):
+        for responses, expected_calls in (([[]], 1),
+                                          ([[self.row], None, [{**self.row, "size": "999"}]], 3)):
+            with self.subTest(expected_calls=expected_calls):
+                self.process.reset_mock()
+                self.respond(*responses)
+                with mock.patch.object(photos.tempfile, "TemporaryDirectory") as temporary:
+                    temporary.return_value.__enter__.return_value = "/synthetic/readback"
+                    with mock.patch.object(photos, "hash_file") as hasher:
+                        with self.assertRaises(photos.Refusal):
+                            self.remote.sha256(self.row)
+                        hasher.assert_not_called()
+                self.assertEqual(self.process.call_count, expected_calls)
 
     def test_remote_byte_budget_refuses_before_download(self):
         oversized = {**self.row, "size": "11"}

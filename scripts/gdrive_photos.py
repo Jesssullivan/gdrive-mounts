@@ -268,7 +268,12 @@ class RcloneRemote:
             raise Refusal("rclone exceeded its operation deadline") from None
         if result.returncode:
             # Never echo argv, stderr or rendered config: all can carry auth context.
-            raise Refusal(f"rclone {args[0]} failed with exit {result.returncode}")
+            operation = "operation"
+            if args and args[0] in ("backend", "rc", "mkdir"):
+                operation = args[0]
+            if len(args) > 1 and args[0] == "backend" and args[1] in ("query", "copyid", "moveid"):
+                operation = f"backend {args[1]}"
+            raise Refusal(f"rclone {operation} failed with exit {result.returncode}")
         return result.stdout
 
     @staticmethod
@@ -337,9 +342,9 @@ class RcloneRemote:
         self.current(row)
 
     def sha256(self, row):
-        self.current(row)
         # Read back by ID even when Drive advertises hashes: this also proves
         # independent transport durability and avoids pathname deduplication.
+        # download brackets the copy with fresh fingerprint checks.
         with tempfile.TemporaryDirectory(prefix="readback-", dir=self.state.root) as temp:
             target = Path(temp) / "object"
             self.download(row, target)
