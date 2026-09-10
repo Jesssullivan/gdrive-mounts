@@ -52,6 +52,12 @@ class IncompleteStage(Refusal):
     """Journal-owned partial bytes must be preserved under their existing name."""
 
 
+class RemoteFailure(Refusal):
+    def __init__(self, operation, returncode):
+        super().__init__(f"rclone {operation} failed with exit {returncode}")
+        self.returncode = returncode
+
+
 def canonical(value):
     return (json.dumps(value, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")) + "\n").encode()
@@ -268,7 +274,12 @@ class RcloneRemote:
             raise Refusal("rclone exceeded its operation deadline") from None
         if result.returncode:
             # Never echo argv, stderr or rendered config: all can carry auth context.
-            raise Refusal(f"rclone {args[0]} failed with exit {result.returncode}")
+            operation = "operation"
+            if args and args[0] in ("backend", "rc", "mkdir"):
+                operation = args[0]
+            if len(args) > 1 and args[0] == "backend" and args[1] in ("query", "copyid", "moveid"):
+                operation = f"backend {args[1]}"
+            raise RemoteFailure(operation, result.returncode)
         return result.stdout
 
     @staticmethod
@@ -337,9 +348,9 @@ class RcloneRemote:
         self.current(row)
 
     def sha256(self, row):
-        self.current(row)
         # Read back by ID even when Drive advertises hashes: this also proves
         # independent transport durability and avoids pathname deduplication.
+        # download brackets the copy with fresh fingerprint checks.
         with tempfile.TemporaryDirectory(prefix="readback-", dir=self.state.root) as temp:
             target = Path(temp) / "object"
             self.download(row, target)
@@ -357,6 +368,58 @@ class RcloneRemote:
             raise Refusal("VFS out-of-space evidence is unavailable or malformed")
         if any(cache[name] for name in required) or cache["outOfSpace"]:
             raise Refusal("VFS uploads have not drained; run verify again after drainage")
+
+    def planning_sha256(self, row):
+        """Plan-only download bound to advertised bytes and a final full snapshot.
+
+        Mutation-phase verification deliberately retains per-object checks.
+        Without an advertised content checksum, retain those checks here too.
+        """
+        expected_md5 = row.get("md5Checksum")
+        if expected_md5 is None or expected_md5 == "":
+            return self.sha256(row)
+        if not isinstance(expected_md5, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", expected_md5):
+            raise Refusal("planning content checksum is malformed")
+        size = row.get("size")
+        if not isinstance(size, (str, int)) or isinstance(size, bool) or not re.fullmatch(r"[0-9]+", str(size)):
+            raise Refusal("planning byte length is unavailable")
+        size = int(size)
+        if size > MAX_BYTES:
+            raise Refusal("planning object exceeds byte budget")
+        advertised_sha = row.get("sha256Checksum")
+        if advertised_sha is not None and (not isinstance(advertised_sha, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{64}", advertised_sha)):
+            raise Refusal("planning SHA256 checksum is malformed")
+        # At most two 120-second operations; never extend mutation retries.
+        for attempt in range(2):
+            try:
+                return self._planning_download(row, size, expected_md5, advertised_sha)
+            except RemoteFailure as error:
+                if error.returncode != 5 or attempt:
+                    raise
+
+    def _planning_download(self, row, size, expected_md5, advertised_sha):
+        with tempfile.TemporaryDirectory(prefix="plan-readback-", dir=self.state.root) as temp:
+            target = Path(temp) / "object"
+            self.run("backend", "copyid", f"gdrive-{ORG}:", row["id"], str(target), "--immutable")
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as payload:
+                before = os.fstat(payload.fileno())
+                if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+                    raise Refusal("planning downloaded byte length differs")
+                md5, sha, length = hashlib.md5(), hashlib.sha256(), 0
+                for block in iter(lambda: payload.read(min(1024 * 1024, size - length + 1)), b""):
+                    length += len(block)
+                    if length > size:
+                        raise Refusal("planning download exceeds advertised length")
+                    md5.update(block)
+                    sha.update(block)
+                if length != size or fingerprint(before) != fingerprint(os.fstat(payload.fileno())):
+                    raise Refusal("planning downloaded file changed")
+            if md5.hexdigest() != expected_md5.lower() or (advertised_sha is not None
+                    and sha.hexdigest() != advertised_sha.lower()):
+                raise Refusal("planning downloaded content differs from inventory")
+            return sha.hexdigest()
 
     def retire(self, row, key):
         self.current(row)
@@ -880,6 +943,9 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp, *, requ
         raise Refusal("SSD corpus has no staged originals")
     root_id = remote.root_folder()
     inventory = remote.inventory(root_id)
+    identifiers = [row.get("id") for row in inventory]
+    if any(not isinstance(identifier, str) or not identifier for identifier in identifiers) or len(set(identifiers)) != len(identifiers):
+        raise Refusal("planning inventory has missing or duplicate IDs")
     dirs = {}
     for row in inventory:
         if row["mimeType"] == FOLDER_MIME:
@@ -899,7 +965,7 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp, *, requ
         remote_bytes += int(row.get("size") or 0)
         if remote_bytes > MAX_BYTES:
             raise Refusal("Drive corpus exceeds the bounded readback byte budget")
-        hashes[row["id"]] = remote.sha256(row)
+        hashes[row["id"]] = getattr(remote, "planning_sha256", remote.sha256)(row)
     originals = [r for r in files if not r["path"].startswith("webp/") and r["id"] in hashes
                  and not (require_curation and r["path"].casefold() in CURATION_PATHS)]
     blockers = []
@@ -1072,6 +1138,8 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp, *, requ
     plan["alias_bindings"] = _derive_alias_bindings(plan)
     if require_curation:
         attach_curation(plan, source_root)
+    if remote.root_folder() != root_id or remote.inventory(root_id) != inventory:
+        raise Refusal("Drive inventory changed during planning; no plan saved")
     return plan
 
 
