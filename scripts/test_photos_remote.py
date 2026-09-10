@@ -860,6 +860,154 @@ class PrivateReviewTests(unittest.TestCase):
         return photos.prepare_review(self.plan, self.key, self.state, self.remote,
                                      self.encoder, self.validator)
 
+    def adoption_fixture(self):
+        self.original["path"] = "a.HEIC"
+        corpus = photos.private_dir(Path(self.temp.name).resolve() / "corpus")
+        self.plan["source_root"] = str(corpus)
+        st = corpus.stat()
+        self.plan["source_identity"] = {"dev": st.st_dev, "ino": st.st_ino}
+        sidecar = corpus / "orientation-judged.csv"
+        sidecar.write_bytes(b"unchanged curation")
+        self.plan["local"] = {"orientation-judged.csv": photos.hash_file(sidecar)}
+        self.prepare()
+        record = self.state.events(self.key)[0]
+        evidence = self.state.root / "sheet.jpg"
+        evidence.write_bytes(b"synthetic reviewed sheet")
+        evidence_sha = photos.hash_file(evidence)["sha256"]
+        decision = {"version": 1, "plan": self.key, "accepted": True, "publication_authorized": False,
+                    "evidence": [{"path": "sheet.jpg", "sha256": evidence_sha, "reviewers": ["one", "two"]}],
+                    "entries": [{"entry": self.webp["key"], "source_id": self.row["id"],
+                                 "source_sha256": self.sha, "preview_sha256": record["preview_sha256"],
+                                 "orientation_degrees": 0, "reviewers": ["one", "two"],
+                                 "evidence_sha256": [evidence_sha]}]}
+        return corpus, decision
+
+    def adopt(self, corpus, decision):
+        raw = photos.canonical(decision)
+        key = hashlib.sha256(raw).hexdigest()
+        path = self.state.root / f"review-{key}.json"
+        if not path.exists():
+            path.write_bytes(raw)
+            path.chmod(0o400)
+        with mock.patch.object(photos, "SSD_ROOT", corpus), \
+                mock.patch.object(photos, "assert_review_ssd"), \
+                mock.patch.object(photos, "validate_webp", self.validator):
+            return photos.adopt_reviewed(self.plan, self.key, self.state, self.remote, key)
+
+    def test_reviewed_adoption_stages_no_overwrite_and_resumes(self):
+        corpus, decision = self.adoption_fixture()
+        before = photos.canonical(self.plan)
+        result = self.adopt(corpus, decision)
+        self.assertEqual(result["staged_files"], 2)
+        self.assertFalse(result["publication_authorized"])
+        self.assertEqual((corpus / "originals/a.HEIC").read_bytes(), b"abc")
+        self.assertEqual((corpus / "webp/a.webp").read_bytes(), b"preview")
+        self.assertEqual(self.adopt(corpus, decision), result)
+        self.assertEqual((corpus / "orientation-judged.csv").read_bytes(), b"unchanged curation")
+        self.assertEqual(photos.canonical(self.plan), before)
+        self.assertEqual(set(c[0] for c in self.remote.mock_calls), {"root_folder", "current", "download"})
+
+    def test_reviewed_adoption_rejects_missing_or_unbound_acceptance(self):
+        corpus, decision = self.adoption_fixture()
+        for field, value in (("accepted", False), ("publication_authorized", True), ("entries", []), ("evidence", [])):
+            with self.subTest(field=field), self.assertRaises(photos.Refusal):
+                self.adopt(corpus, {**decision, field: value})
+        for changes in ({"orientation_degrees": 90}, {"reviewers": ["one"]},
+                        {"source_id": "wrong"}, {"preview_sha256": "0" * 64}):
+            with self.subTest(changes=changes), self.assertRaises(photos.Refusal):
+                self.adopt(corpus, {**decision, "entries": [{**decision["entries"][0], **changes}]})
+        self.assertFalse((corpus / "originals").exists())
+
+    def test_reviewed_adoption_preserves_preexisting_and_symlink_targets(self):
+        corpus, decision = self.adoption_fixture()
+        (corpus / "originals").mkdir()
+        target = corpus / "originals/a.HEIC"
+        target.write_bytes(b"unrelated")
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+        self.assertEqual(target.read_bytes(), b"unrelated")
+        target.unlink()
+        target.symlink_to(corpus / "orientation-judged.csv")
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+        self.assertTrue(target.is_symlink())
+
+    def test_reviewed_adoption_tampered_evidence_or_curation_refuses(self):
+        corpus, decision = self.adoption_fixture()
+        (self.state.root / "sheet.jpg").write_bytes(b"different sheet")
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+        (self.state.root / "sheet.jpg").write_bytes(b"synthetic reviewed sheet")
+        (corpus / "orientation-judged.csv").write_bytes(b"changed curation")
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+        self.assertFalse((corpus / "originals").exists())
+
+    def test_reviewed_adoption_resumes_after_rename_interruption(self):
+        corpus, decision = self.adoption_fixture()
+        original_rename = photos.rename_noreplace
+        def renamed_then_failed(*args):
+            original_rename(*args)
+            raise OSError("synthetic crash after rename")
+        with mock.patch.object(photos, "rename_noreplace", side_effect=renamed_then_failed):
+            with self.assertRaises(OSError):
+                self.adopt(corpus, decision)
+        self.assertEqual(self.adopt(corpus, decision)["staged_files"], 2)
+        self.assertEqual((corpus / "originals/a.HEIC").read_bytes(), b"abc")
+
+    def test_reviewed_adoption_refuses_ready_without_intent(self):
+        corpus, decision = self.adoption_fixture()
+        review_digest = photos.digest(decision)
+        self.state.event(self.key, "review-stage-ready", review_digest=review_digest,
+                         path="originals/a.HEIC", sha256=self.sha, dev=1, ino=1, size=3)
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+
+    def test_reviewed_adoption_resumes_ready_before_rename(self):
+        corpus, decision = self.adoption_fixture()
+        with mock.patch.object(photos, "rename_noreplace", side_effect=OSError("before rename")):
+            with self.assertRaises(OSError):
+                self.adopt(corpus, decision)
+        self.assertFalse((corpus / "originals/a.HEIC").exists())
+        self.assertEqual(self.adopt(corpus, decision)["staged_files"], 2)
+
+    def test_reviewed_adoption_refuses_case_parent_and_symlink_payload(self):
+        corpus, decision = self.adoption_fixture()
+        (corpus / "Originals").mkdir()
+        with self.assertRaises(photos.Refusal):
+            self.adopt(corpus, decision)
+        (corpus / "Originals").rmdir()
+        preview = self.state.root / f"review-{self.key}" / self.webp["key"] / "preview.webp"
+        preview.unlink()
+        preview.symlink_to(corpus / "orientation-judged.csv")
+        with self.assertRaises(OSError):
+            self.adopt(corpus, decision)
+        self.assertFalse((corpus / "originals").exists())
+
+    def test_review_decisions_digest_and_privacy_fail_closed(self):
+        raw = b"{}"
+        key = hashlib.sha256(raw).hexdigest()
+        path = self.state.root / f"review-{key}.json"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        with self.assertRaises(photos.Refusal):
+            photos.review_decisions(self.state, key)
+        path.write_bytes(b"[]")
+        path.chmod(0o400)
+        with self.assertRaises(photos.Refusal):
+            photos.review_decisions(self.state, key)
+
+    def test_review_ssd_uuid_probe_is_exact_and_bounded(self):
+        good = {"VolumeUUID": "E3131481-8D53-4688-B20A-E1F71DC0C61E", "MountPoint": "/Volumes/TinylandSSD"}
+        with mock.patch.object(photos.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, photos.plistlib.dumps(good), b"")
+            photos.assert_review_ssd()
+            self.assertEqual(run.call_args.kwargs["timeout"], 15)
+            for changes in ({"VolumeUUID": "wrong"}, {"MountPoint": "/wrong"}):
+                run.return_value = subprocess.CompletedProcess([], 0, photos.plistlib.dumps({**good, **changes}), b"")
+                with self.assertRaises(photos.Refusal):
+                    photos.assert_review_ssd()
+
     def test_private_review_prepares_unaccepted_bytes_and_resumes_without_reencoding(self):
         before = photos.canonical(self.plan)
         result = self.prepare()

@@ -18,6 +18,7 @@ import hashlib
 from importlib import metadata
 import json
 import os
+import plistlib
 from pathlib import Path, PurePosixPath
 import re
 import stat
@@ -1786,11 +1787,220 @@ def prepare_review(plan, key, state, remote, encoder=convert, validator=validate
             "accepted": False, "publication_authorized": False}
 
 
+def review_decisions(state, review_digest):
+    if not isinstance(review_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", review_digest):
+        raise Refusal("review requires its full immutable digest")
+    path = state.root / f"review-{review_digest}.json"
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        before = os.fstat(source.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) & 0o277 or before.st_size > 8 * 1024 ** 2):
+            raise Refusal("review decisions must be bounded, private and read-only")
+        raw = source.read(8 * 1024 ** 2 + 1)
+        if fingerprint(before) != fingerprint(os.fstat(source.fileno())):
+            raise Refusal("review decisions changed during read")
+    if hashlib.sha256(raw).hexdigest() != review_digest:
+        raise Refusal("review decision digest mismatch")
+    return json.loads(raw)
+
+
+def assert_review_ssd():
+    result = subprocess.run(["/usr/sbin/diskutil", "info", "-plist", "/Volumes/TinylandSSD"],
+                            capture_output=True, timeout=15, check=False)
+    if result.returncode:
+        raise Refusal("SSD identity probe failed")
+    info = plistlib.loads(result.stdout)
+    if (info.get("VolumeUUID") != "E3131481-8D53-4688-B20A-E1F71DC0C61E"
+            or info.get("MountPoint") != "/Volumes/TinylandSSD"):
+        raise Refusal("SSD volume identity differs")
+
+
+def adopt_reviewed(plan, key, state, remote, review_digest):
+    """Stage explicitly reviewed bytes locally; neither publish nor retire."""
+    decisions = review_decisions(state, review_digest)
+    if (not isinstance(decisions, dict) or type(decisions.get("version")) is not int
+            or decisions.get("version") != 1 or decisions.get("plan") != key
+            or decisions.get("accepted") is not True
+            or decisions.get("publication_authorized") is not False
+            or not isinstance(decisions.get("entries"), list)
+            or any(not isinstance(row, dict) for row in decisions["entries"])
+            or not isinstance(decisions.get("evidence"), list)
+            or any(not isinstance(row, dict) for row in decisions["evidence"])):
+        raise Refusal("review decisions do not authorize private collection adoption")
+    validate_alias_bindings(plan)
+    evidence = {}
+    for item in decisions.get("evidence", []):
+        evidence_sha, reviewers = item.get("sha256"), item.get("reviewers")
+        if (not isinstance(evidence_sha, str) or not re.fullmatch(r"[a-f0-9]{64}", evidence_sha)
+                or evidence_sha in evidence or not isinstance(reviewers, list)
+                or any(not isinstance(r, str) or not r.strip() for r in reviewers)):
+            raise Refusal("review evidence identity is invalid")
+        evidence_path = state.root / relative(item["path"])
+        private_dir(evidence_path.parent)
+        if hash_file(evidence_path)["sha256"] != evidence_sha:
+            raise Refusal("review evidence artifact changed")
+        evidence[evidence_sha] = set(reviewers)
+    entries = {entry["key"]: entry for entry in plan["entries"]}
+    expected = {entry["key"] for entry in entries.values() if entry["kind"] == "webp"
+                and entry["recipe"]["operation"] == "encode-original"}
+    selected = decisions["entries"]
+    if (len(selected) > MAX_FILES or len(selected) != len(expected)
+            or any(not isinstance(r.get("entry"), str) for r in selected)
+            or {r.get("entry") for r in selected} != expected):
+        raise Refusal("review decisions must cover each missing derivative exactly once")
+    prepared = [r for r in state.events(key) if r.get("event") == "review-prepared"]
+    work, paths = [], set()
+    for decision in selected:
+        entry = entries[decision["entry"]]
+        original = entries[entry["original_key"]]
+        records = [r for r in prepared if r.get("entry") == entry["key"]]
+        reviewers = decision.get("reviewers")
+        if (len(records) != 1 or decision.get("orientation_degrees") != 0
+                or type(decision.get("orientation_degrees")) is not int
+                or not isinstance(reviewers, list) or len(reviewers) < 2
+                or any(not isinstance(r, str) or not r.strip() for r in reviewers)
+                or len(set(reviewers)) != len(reviewers)):
+            raise Refusal("review lacks independent completed zero-rotation decisions")
+        record = records[0]
+        evidence_hashes = decision.get("evidence_sha256")
+        if (not isinstance(evidence_hashes, list) or not evidence_hashes
+                or any(not isinstance(value, str) or value not in evidence for value in evidence_hashes)
+                or not set(reviewers).issubset(set().union(*(evidence[value] for value in evidence_hashes)))):
+            raise Refusal("review decisions lack hash-bound reviewer evidence")
+        row = original["source"]["remote"]
+        if (record.get("accepted") is not False or record.get("publication_authorized") is not False
+                or record.get("recipe") != entry["recipe"] or record.get("original_key") != original["key"]
+                or entry["recipe"].get("codec_versions") != codec_versions()
+                or record.get("source_id") != original["keep_id"] or row not in plan["remote_inventory"]
+                or row["id"] != original["keep_id"] or record.get("source_sha256") != original["sha256"]
+                or any(decision.get(field) != record.get(field) for field in
+                       ("source_id", "source_sha256", "preview_sha256"))):
+            raise Refusal("review source or preview provenance differs")
+        directory = private_dir(state.root / f"review-{key}" / entry["key"])
+        source, preview = directory / "original", directory / "preview.webp"
+        if (hash_file(source)["sha256"] != original["sha256"]
+                or source.stat().st_size != int(row["size"])
+                or hash_file(preview)["sha256"] != record["preview_sha256"]):
+            raise Refusal("reviewed bytes changed")
+        validate_webp(preview)
+        remote.current(row)
+        original_path = relative(original["path"])
+        for destination, payload, sha in (
+                (str(PurePosixPath("originals") / original_path), source, original["sha256"]),
+                (str(PurePosixPath("webp") / original_path.with_suffix(".webp")), preview, record["preview_sha256"])):
+            if destination.casefold() in paths or destination.casefold() in {p.casefold() for p in plan["local"]}:
+                raise Refusal("review adoption destination collides with existing collection")
+            paths.add(destination.casefold())
+            work.append((destination, payload, sha))
+    if remote.root_folder() != plan["drive_root_id"]:
+        raise Refusal("review Drive root changed")
+    assert_review_ssd()
+    root = Path(plan["source_root"])
+    if root != SSD_ROOT or root.resolve() != root.absolute():
+        raise Refusal("review adoption requires the exact non-symlink SSD root")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(root_fd)
+        if {"dev": st.st_dev, "ino": st.st_ino} != plan["source_identity"]:
+            raise Refusal("review SSD source root identity changed")
+        # Verify curation evidence before and after staging; never rewrite it.
+        for path, value in plan["local"].items():
+            if path in CURATION_PATHS:
+                with anchored_parent(root_fd, path) as (parent, name):
+                    if hash_at(parent, name) != value:
+                        raise Refusal("review curation changed")
+        for destination, payload, sha in work:
+            _stage_reviewed_file(key, state, review_digest, root_fd, destination, payload, sha)
+        for path, value in plan["local"].items():
+            if path in CURATION_PATHS:
+                with anchored_parent(root_fd, path) as (parent, name):
+                    if hash_at(parent, name) != value:
+                        raise Refusal("review curation changed during staging")
+    finally:
+        os.close(root_fd)
+    return {"staged_files": len(work), "review_digest": review_digest,
+            "private_collection_accepted": True, "publication_authorized": False}
+
+
+@contextlib.contextmanager
+def _review_parent(root_fd, destination):
+    parts = relative(destination).parts
+    fd, device = os.dup(root_fd), os.fstat(root_fd).st_dev
+    try:
+        for part in parts[:-1]:
+            names = [name for name in os.listdir(fd) if name.casefold() == part.casefold()]
+            if names and names != [part]:
+                raise Refusal("review adoption parent has a case collision")
+            if not names:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if os.fstat(fd).st_dev != device:
+                raise Refusal("review adoption parent crosses filesystems")
+        yield fd, parts[-1]
+    finally:
+        os.close(fd)
+
+
+def _stage_reviewed_file(key, state, review_digest, root_fd, destination, payload, sha):
+    events = [r for r in state.events(key) if r.get("review_digest") == review_digest
+              and r.get("path") == destination]
+    intents = [r for r in events if r.get("event") == "review-stage-intent"]
+    ready = [r for r in events if r.get("event") == "review-stage-ready"]
+    if len(intents) > 1 or len(ready) > 1 or (ready and not intents):
+        raise Refusal("review staging journal is ambiguous")
+    with _review_parent(root_fd, destination) as (parent, name):
+        aliases = [p for p in os.listdir(parent) if p.casefold() == name.casefold()]
+        if aliases and (aliases != [name] or not ready):
+            raise Refusal("unowned review adoption destination exists")
+        temporary = intents[0]["temporary"] if intents else f".gdm-review-{uuid.uuid4().hex}.tmp"
+        if not re.fullmatch(r"\.gdm-review-[a-f0-9]{32}\.tmp", temporary):
+            raise Refusal("review staging name is invalid")
+        if ready:
+            record = ready[0]
+            chosen = name if aliases else temporary
+            actual = hash_at(parent, chosen)
+            if (actual["sha256"] != sha or record.get("sha256") != sha
+                    or any(actual["fingerprint"][field] != record.get(field) for field in ("dev", "ino", "size"))):
+                raise Refusal("journal-owned review staging bytes differ")
+        else:
+            if not intents:
+                state.event(key, "review-stage-intent", review_digest=review_digest,
+                            path=destination, temporary=temporary)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=parent)
+            with os.fdopen(fd, "wb") as target:
+                source_fd = os.open(payload, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(source_fd, "rb") as source:
+                    source_stat = os.fstat(source.fileno())
+                    if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size > MAX_BYTES:
+                        raise Refusal("review payload is not a bounded regular file")
+                    before, calculated, length = fingerprint(source_stat), hashlib.sha256(), 0
+                    for block in iter(lambda: source.read(min(1024 * 1024, before["size"] - length + 1)), b""):
+                        length += len(block)
+                        if length > before["size"]:
+                            raise Refusal("review payload grew during staging")
+                        calculated.update(block)
+                        target.write(block)
+                    if calculated.hexdigest() != sha or fingerprint(os.fstat(source.fileno())) != before:
+                        raise Refusal("review payload changed during staging")
+                target.flush()
+                os.fsync(target.fileno())
+                identity = os.fstat(target.fileno())
+            state.event(key, "review-stage-ready", review_digest=review_digest, path=destination,
+                        sha256=sha, dev=identity.st_dev, ino=identity.st_ino, size=identity.st_size)
+        if not aliases:
+            rename_noreplace(temporary, name, parent, parent)
+            os.fsync(parent)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "apply", "verify", "retire", "prepare-review"))
+    parser.add_argument("command", choices=("plan", "apply", "verify", "retire", "prepare-review", "adopt-reviewed"))
     parser.add_argument("plan_digest", nargs="?")
     parser.add_argument("--approve-digest", help="explicit exact-manifest approval for recoverable retirement")
+    parser.add_argument("--review-digest", help="immutable private collection review decision digest")
     parser.add_argument("--settings", default=str(Path.home() / ".local/state/gdrive-mounts/effective-settings.json"))
     parser.add_argument("--state-dir")
     parser.add_argument("--mounted-readback", action="store_true",
@@ -1819,6 +2029,8 @@ def main(argv=None):
                     raise Refusal("plan roots do not match the explicit corpus and effective mount")
                 if args.command == "prepare-review":
                     result = prepare_review(plan, key, state, remote)
+                elif args.command == "adopt-reviewed":
+                    result = adopt_reviewed(plan, key, state, remote, args.review_digest)
                 elif args.command == "apply":
                     result = {"entries": apply_plan(plan, key, state, remote, MountedIO(point))}
                 elif args.command == "verify":

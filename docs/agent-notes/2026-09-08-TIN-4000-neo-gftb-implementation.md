@@ -796,3 +796,30 @@ Independent source review approved the private preparation boundary. The
 native registered photo suite passed 172 tests with zero skips, including
 real codec preparation and retry/resume safety cases. This source receipt
 does not claim that new outputs have been reviewed, published or retired.
+
+### Reviewed SSD adoption source — 2026-09-10
+
+`photos adopt-reviewed PLAN --review-digest REVIEW` now requires complete
+digest-bound decisions for the missing derivatives, two distinct reviewers
+bound to hashed private evidence, unchanged original/preview bytes and exact
+Drive provenance. It stages paired SSD originals and WebPs with journal-owned
+UUID temporary files and atomic no-replace promotion. The exact SSD UUID and
+root identity are checked; curation is checked before and after staging.
+Ambiguous partials, unowned destinations, symlinks and case collisions refuse.
+Only zero-additional-rotation reviewed previews are supported. Private
+collection acceptance does not confer public sharing or retirement authority.
+
+Independent source review found no blocking safety defect. The registered
+`just check` completed successfully with the pinned native Python/Pillow/HEIF
+runtime and the already-cached schema validator supplied explicitly: 182 photo
+tests with zero skips, 49 maintenance tests, 40 shell assertions, schema/render,
+secrets, endpoint, manifest, Home Manager evaluation and workflow validation.
+This is local gate evidence, not realization of the combined development shell
+or a v4 CI result. No new Home Manager switch is required for this CLI phase.
+
+The fresh 2026-09-10T15:56:45Z runtime snapshot reported Neo generation 27,
+the same installed source `6c9c9f493038404051c67a3fed0af1b27e9035dc`, writable
+NFS, and zero queued, active or errored uploads. SSD UUID remained
+`E3131481-8D53-4688-B20A-E1F71DC0C61E`. This snapshot is not a future upload
+drainage guarantee or completed photo-workload acceptance. Live adoption,
+publication, approved retirement and final readback remain separate receipts.
