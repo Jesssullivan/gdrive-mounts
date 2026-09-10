@@ -51,6 +51,95 @@ class RemoteAdapterTests(unittest.TestCase):
     def command(self, index=-1):
         return self.process.call_args_list[index].args[0]
 
+    @contextlib.contextmanager
+    def reuse_fixture(self):
+        sha = hashlib.sha256(b"abc").hexdigest()
+        row = {**self.row, "sha256Checksum": sha}
+        with mock.patch.object(photos, "local_inventory", return_value={"originals/a.HEIC": {"sha256": sha}}), \
+                mock.patch.object(photos.Path, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=2)), \
+                mock.patch.object(self.remote, "root_folder", return_value="folder-root") as root, \
+                mock.patch.object(self.remote, "inventory", return_value=[row]) as inventory, \
+                mock.patch.object(self.remote, "planning_sha256", return_value=sha) as readback, \
+                mock.patch.object(photos, "codec_versions", return_value={"test": "1"}):
+            prior = photos.make_plan("/synthetic/photos", "/synthetic/mount", self.remote)
+            readback.reset_mock()
+            root.reset_mock()
+            inventory.reset_mock()
+            yield prior, row, root, inventory, readback
+
+    def reused_plan(self, prior):
+        return photos.make_plan("/synthetic/photos", "/synthetic/mount", self.remote,
+                                reuse_plan=prior, reuse_plan_digest=photos.digest(prior))
+
+    def test_plan_reuses_only_prior_payload_hash_and_retains_snapshot_checks(self):
+        with self.reuse_fixture() as (prior, row, root, inventory, readback):
+            original = photos.canonical(prior)
+            result = self.reused_plan(prior)
+            readback.assert_not_called()
+            self.assertEqual(root.call_count, 2)
+            self.assertEqual(inventory.call_count, 2)
+            self.assertEqual(result["readback_reuse"], {"source_plan_digest": photos.digest(prior), "reused_objects": 1})
+            self.assertEqual(photos.canonical(prior), original)
+
+    def test_plan_reuse_changed_or_missing_metadata_falls_back(self):
+        for changes in ({"id": "replacement"}, {"parent": "new-parent"}, {"path": "renamed.HEIC"},
+                        {"name": "new.HEIC"}, {"mimeType": "image/heif"}, {"size": "4"},
+                        {"md5Checksum": "0" * 32}, {"modifiedTime": "changed"},
+                        {"sha256Checksum": "0" * 64}, {"sha256Checksum": None}):
+            with self.subTest(changes=changes), self.reuse_fixture() as (prior, row, root, inventory, readback):
+                inventory.return_value = [{**row, **changes}]
+                result = self.reused_plan(prior)
+                readback.assert_called_once_with(inventory.return_value[0])
+                self.assertEqual(result["readback_reuse"]["reused_objects"], 0)
+
+    def test_plan_reuse_invalid_unchanged_metadata_or_unproven_id_falls_back(self):
+        for field, value in (("sha256Checksum", None), ("md5Checksum", "bad"), ("modifiedTime", "")):
+            with self.subTest(field=field), self.reuse_fixture() as (prior, row, root, inventory, readback):
+                prior["remote_inventory"][0][field] = value
+                result = self.reused_plan(prior)
+                readback.assert_called_once()
+                self.assertEqual(result["readback_reuse"]["reused_objects"], 0)
+        row = {**self.row, "sha256Checksum": hashlib.sha256(b"abc").hexdigest()}
+        self.assertIsNone(photos.reusable_payload_sha(row, {row["id"]: row}, {}))
+
+    def test_prior_retirement_payload_evidence_and_conflicts(self):
+        sha = hashlib.sha256(b"abc").hexdigest()
+        prior = {"remote_inventory": [self.row], "entries": [],
+                 "retirement": [{"row": self.row, "sha256": sha}]}
+        rows, hashes = photos.prior_payload_evidence(prior, photos.digest(prior))
+        self.assertEqual(hashes, {self.row["id"]: sha})
+        prior["entries"] = [{"keep_id": self.row["id"], "sha256": "0" * 64}]
+        with self.assertRaisesRegex(photos.Refusal, "conflicts"):
+            photos.prior_payload_evidence(prior, photos.digest(prior))
+        prior["entries"] = []
+        prior["retirement"][0]["row"] = {**self.row, "modifiedTime": "changed"}
+        with self.assertRaisesRegex(photos.Refusal, "differs"):
+            photos.prior_payload_evidence(prior, photos.digest(prior))
+
+    def test_plan_reuse_still_refuses_final_snapshot_or_api_failure(self):
+        for final in ([], photos.Refusal("API unavailable")):
+            with self.subTest(final=final), self.reuse_fixture() as (prior, row, root, inventory, readback):
+                inventory.side_effect = [[row], final]
+                with self.assertRaises(photos.Refusal):
+                    self.reused_plan(prior)
+                readback.assert_not_called()
+
+    def test_plan_reuse_rejects_wrong_digest_before_readback(self):
+        with self.reuse_fixture() as (prior, row, root, inventory, readback):
+            with self.assertRaisesRegex(photos.Refusal, "digest"):
+                photos.make_plan("/synthetic/photos", "/synthetic/mount", self.remote,
+                                 reuse_plan=prior, reuse_plan_digest="0" * 64)
+            readback.assert_not_called()
+
+    def test_plan_reuse_refuses_different_org_roots_or_drive_identity(self):
+        for field, value in (("org", "other"), ("source_root", "/other"),
+                             ("mount_point", "/other"), ("drive_root_id", "other"), ("version", True)):
+            with self.subTest(field=field), self.reuse_fixture() as (prior, row, root, inventory, readback):
+                prior[field] = value
+                with self.assertRaises(photos.Refusal):
+                    self.reused_plan(prior)
+                readback.assert_not_called()
+
     def test_planning_download_binds_size_md5_and_sha256(self):
         for changes, payload, passes in (
                 ({}, b"abc", True),
