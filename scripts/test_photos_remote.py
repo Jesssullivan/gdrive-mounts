@@ -51,6 +51,97 @@ class RemoteAdapterTests(unittest.TestCase):
     def command(self, index=-1):
         return self.process.call_args_list[index].args[0]
 
+    def test_planning_download_binds_size_md5_and_sha256(self):
+        for changes, payload, passes in (
+                ({}, b"abc", True),
+                ({"sha256Checksum": hashlib.sha256(b"abc").hexdigest()}, b"abc", True),
+                ({}, b"abd", False), ({}, b"ab", False), ({}, b"abcd", False),
+                ({"sha256Checksum": "0" * 64}, b"abc", False)):
+            with self.subTest(changes=changes, payload=payload), photos.tempfile.TemporaryDirectory() as temp:
+                self.remote.state.root = Path(temp)
+                def copied(*args):
+                    Path(args[4]).write_bytes(payload)
+                with mock.patch.object(self.remote, "run", side_effect=copied) as run, \
+                        mock.patch.object(self.remote, "current") as current:
+                    if passes:
+                        self.assertEqual(self.remote.planning_sha256({**self.row, **changes}), hashlib.sha256(payload).hexdigest())
+                    else:
+                        with self.assertRaises(photos.Refusal):
+                            self.remote.planning_sha256({**self.row, **changes})
+                    self.assertEqual(run.call_count, 1)
+                    current.assert_not_called()
+                self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_planning_missing_md5_retains_checked_sha256(self):
+        with mock.patch.object(self.remote, "sha256", return_value="checked") as checked:
+            row = {**self.row, "md5Checksum": None}
+            self.assertEqual(self.remote.planning_sha256(row), "checked")
+            checked.assert_called_once_with(row)
+
+    def test_planning_refuses_malformed_metadata_before_download(self):
+        for changes in ({"size": None}, {"size": "-1"}, {"size": True},
+                        {"size": str(photos.MAX_BYTES + 1)}, {"md5Checksum": "bad"},
+                        {"md5Checksum": False}, {"md5Checksum": 0},
+                        {"sha256Checksum": "bad"}):
+            with self.subTest(changes=changes), self.assertRaises(photos.Refusal):
+                self.remote.planning_sha256({**self.row, **changes})
+        self.process.assert_not_called()
+
+    def test_planning_retry_only_exit_five_and_fresh_destination(self):
+        for failures, expected_calls, succeeds in (([5], 2, True), ([5, 5], 2, False), ([7], 1, False)):
+            with self.subTest(failures=failures), photos.tempfile.TemporaryDirectory() as temp:
+                self.remote.state.root = Path(temp)
+                paths = []
+                def copied(*args):
+                    paths.append(args[4])
+                    Path(args[4]).write_bytes(b"partial" if len(paths) <= len(failures) else b"abc")
+                    if len(paths) <= len(failures):
+                        raise photos.RemoteFailure("backend copyid", failures[len(paths) - 1])
+                with mock.patch.object(self.remote, "run", side_effect=copied):
+                    if succeeds:
+                        self.assertEqual(self.remote.planning_sha256(self.row), hashlib.sha256(b"abc").hexdigest())
+                    else:
+                        with self.assertRaises(photos.RemoteFailure):
+                            self.remote.planning_sha256(self.row)
+                self.assertEqual(len(paths), expected_calls)
+                self.assertEqual(len(set(paths)), expected_calls)
+                self.assertEqual(list(Path(temp).iterdir()), [])
+
+    def test_remote_run_does_not_retry_mutation_failure(self):
+        self.process.side_effect = [subprocess.CompletedProcess([], 5, b"", b"private")]
+        with self.assertRaises(photos.RemoteFailure):
+            self.remote.run("backend", "moveid", "synthetic", "id", "destination")
+        self.assertEqual(self.process.call_count, 1)
+
+    def test_planning_timeout_and_missing_payload_do_not_retry(self):
+        for failure in (photos.Refusal("rclone exceeded its operation deadline"), None):
+            with self.subTest(failure=failure), photos.tempfile.TemporaryDirectory() as temp:
+                self.remote.state.root = Path(temp)
+                with mock.patch.object(self.remote, "run", side_effect=failure) as run:
+                    with self.assertRaises((photos.Refusal, FileNotFoundError)):
+                        self.remote.planning_sha256(self.row)
+                    self.assertEqual(run.call_count, 1)
+
+    def test_planning_snapshot_refuses_root_or_inventory_drift(self):
+        local = {"originals/a.HEIC": {"sha256": "1" * 64}}
+        for roots, inventories in ((["folder-root", "replacement"], [[self.row]]),
+                                   (["folder-root", "folder-root"], [[self.row], []]),
+                                   (["folder-root", "folder-root"], [[self.row], [self.row, {**self.row, "id": "new"}]]),
+                                   (["folder-root", "folder-root"], [[self.row], [{**self.row, "modifiedTime": "changed"}]]),
+                                   (["folder-root", "folder-root"], [[self.row], [{**self.row, "parent": "changed"}]]),
+                                   (["folder-root"], [[self.row, self.row]]),
+                                   (["folder-root", photos.Refusal("root failed")], [[self.row]]),
+                                   (["folder-root", "folder-root"], [[self.row], photos.Refusal("inventory failed")])):
+            with self.subTest(roots=roots, inventories=inventories), \
+                    mock.patch.object(photos, "local_inventory", return_value=local), \
+                    mock.patch.object(photos.Path, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=2)), \
+                    mock.patch.object(self.remote, "root_folder", side_effect=roots), \
+                    mock.patch.object(self.remote, "inventory", side_effect=inventories), \
+                    mock.patch.object(self.remote, "planning_sha256", return_value="1" * 64), \
+                    mock.patch.object(photos, "codec_versions", return_value={}):
+                with self.assertRaises(photos.Refusal):
+                    photos.make_plan("/synthetic/photos", "/synthetic/mount", self.remote)
+
     def test_run_uses_argv_serial_limits_and_external_deadline(self):
         self.respond([])
         self.remote.run("backend", "query", "gdrive-sulliwood:", "name = 'a; $(false)'")
@@ -353,7 +444,7 @@ class RemoteAdapterTests(unittest.TestCase):
                 mock.patch.object(photos.Path, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=2)), \
                 mock.patch.object(self.remote, "root_folder", return_value="folder-root"), \
                 mock.patch.object(self.remote, "inventory", return_value=rows), \
-                mock.patch.object(self.remote, "sha256", side_effect=lambda row: hashes[row["id"]]), \
+                mock.patch.object(self.remote, "planning_sha256", side_effect=lambda row: hashes[row["id"]]), \
                 mock.patch.object(photos, "codec_versions", return_value={"synthetic": "1"}) as codecs:
             plan = photos.make_plan("/synthetic/photos", "/synthetic/mount", self.remote, validator)
         self.process.assert_not_called()

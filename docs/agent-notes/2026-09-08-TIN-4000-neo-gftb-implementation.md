@@ -713,3 +713,43 @@ Native inspection also found a real photo verification defect: `nfsstat` is
 synthetic mount-entry regression. It does not weaken negotiated-NFS checks.
 GFTB authoritative-path, Drive-ID/hash, retirement and mounted-readback
 acceptance remain unproved.
+
+## Native runtime and planning transport correction — 2026-09-10
+
+The earlier runtime and admission observations above are superseded. The
+operator explicitly directed execution without a memory-pressure gate; that
+ruling is recorded in TIN-4000 comment
+`d96798ee-85f5-40e7-a83b-0781da41a6cd`. The named Drive collection, SSD staging
+and private photo state are in task scope. Unset launcher variables are not
+evidence of denied access. The operator's writer-pause attestation remains
+the coordination authority; retirement still requires the exact manifest.
+
+The pinned native arm64 Python 3.14.7, Pillow 12.3.0 and pillow-heif 1.4.0
+runtime is installed. Native HEIF/WebP fixtures passed, and the revised
+registered photo suite passed 165 tests with zero skips. Maintenance contracts
+passed 49 tests. Schema/render, 40 shell assertions, secrets scan,
+endpoint-free, repository manifest, workflow and Home Manager evaluation gates
+passed through their registered entrypoints. The initial ambient schema checks
+were incomplete; their successful rerun used the pinned, already-installed
+check-jsonschema package. The combined development shell did not realize:
+its Darwin environment derivation had no eligible builder with local builds
+disabled. No builder policy was changed and no combined-shell pass is claimed.
+
+The unique Drive root is `1PI-aLEkshfKv1VtWJGmCPOa3tByTlKjV`, at
+`/Users/jess/GDrive/sulliwood/GFTB Stuff`. Direct inventory listed 444 root
+files and 227 WebPs, not deduplicated counts. The diagnostic planner completed
+200 rclone operations before `backend copyid` exited 5 with sanitized error
+categories `503`, `timeout` and `failed to copy`. It saved no manifest and
+changed no photos; its private readback directory was cleaned up.
+
+The correction removes one redundant identity query and labels backend
+failures without exposing arguments or stderr. Planning now downloads serially
+by ID, compares actual size and MD5 plus advertised SHA256 when present, and
+computes independent SHA256. Missing MD5 retains the existing per-object
+checks. Root identity and the complete inventory must match again before a
+plan can be returned. Retryable exit 5 permits one plan-only retry to a fresh
+private destination. Each operation retains its 120-second deadline; byte
+length is checked after transfer, not claimed as a hard transport cap.
+Apply, verify and retirement retain their existing per-object checks and do
+not acquire automatic mutation retries. These source tests are not a live
+consolidation or mounted-readback acceptance receipt.
