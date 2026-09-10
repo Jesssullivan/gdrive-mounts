@@ -277,6 +277,9 @@ class RcloneRemote:
 
     def query(self, query):
         rows = json.loads(self.run("backend", "query", f"gdrive-{ORG}:", query))
+        # rclone serializes an empty Drive query result as JSON null.
+        if rows is None:
+            return []
         if not isinstance(rows, list):
             raise Refusal("unexpected Drive query response")
         return rows
