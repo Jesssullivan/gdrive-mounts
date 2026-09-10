@@ -132,6 +132,23 @@ curation, or publish, promote or retire any object. Review the actual previews
 before accepting a derivative. An ambiguous orientation remains a decision,
 not a reason to replay historical rotations or silently accept encoder output.
 
+After completed, hash-bound visual review, `just photos adopt-reviewed
+PLAN_SHA256 --review-digest REVIEW_SHA256` stages the reviewed originals and
+unchanged previews into paired SSD `originals/` and `webp/` paths. The private
+read-only `review-REVIEW_SHA256.json` decision covers every missing derivative
+and binds its source Drive ID, original and preview hashes, and independent
+review evidence. This phase supports only reviewed zero-additional-rotation
+previews; it refuses ambiguous or incomplete review and never replays old
+rotation notes. Acceptance here is for the private collection, not public
+sharing, design selection or a change to publication restrictions.
+
+Adoption checks the SSD UUID, anchored paths, original plan identity, source
+Drive fingerprints and unchanged curation. It uses journal-owned temporary
+files and no-replace promotion; unowned existing destinations are preserved
+and refused. Resume only the same review digest with unchanged evidence.
+After adoption, run `plan` to produce a new immutable whole-collection plan.
+Neither review nor adoption edits the old plan or authorizes retirement.
+
 At warning memory pressure, inspection is limited to the four named root and
 `webp/` copies of these documents, at most 64 KiB each, after checking the SSD
 UUID and non-symlink paths. Critical pressure refuses even these reads. Corpus
