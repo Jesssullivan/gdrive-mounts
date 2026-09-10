@@ -831,5 +831,135 @@ class NFSRenameContractTests(unittest.TestCase):
         exclusive.assert_called_once_with(7, b"staged", 8, b"final", 4)
 
 
+class PrivateReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = photos.tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = photos.State(Path(self.temp.name).resolve() / "state")
+        self.key = "a" * 64
+        self.row = object_row()
+        self.sha = hashlib.sha256(b"abc").hexdigest()
+        self.original = {"key": "b" * 64, "kind": "original", "sha256": self.sha,
+                         "keep_id": self.row["id"], "source": {"remote": self.row}}
+        self.webp = {"key": "c" * 64, "kind": "webp", "original_key": self.original["key"],
+                     "sha256": None, "keep_id": None,
+                     "recipe": {**photos.RECIPE, "operation": "encode-original",
+                                "source_original_sha256": self.sha, "codec_versions": {"test": "1"}}}
+        self.plan = {"entries": [self.original, self.webp], "remote_inventory": [self.row],
+                     "drive_root_id": "root", "blockers": ["orientation review"]}
+        self.remote = mock.Mock()
+        self.remote.root_folder.return_value = "root"
+        self.remote.download.side_effect = lambda row, target: target.write_bytes(b"abc")
+        self.encoder = mock.Mock(side_effect=lambda source, target: target.write_bytes(b"preview"))
+        self.validator = mock.Mock(return_value={"width": 2, "height": 1})
+        patch = mock.patch.object(photos, "codec_versions", return_value={"test": "1"})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def prepare(self):
+        return photos.prepare_review(self.plan, self.key, self.state, self.remote,
+                                     self.encoder, self.validator)
+
+    def test_private_review_prepares_unaccepted_bytes_and_resumes_without_reencoding(self):
+        before = photos.canonical(self.plan)
+        result = self.prepare()
+        self.assertFalse(result["accepted"])
+        self.assertFalse(result["publication_authorized"])
+        self.assertEqual(result["prepared"], 1)
+        self.assertTrue(Path(result["review_directory"]).is_relative_to(self.state.root))
+        self.assertEqual(self.prepare(), result)
+        self.remote.download.assert_called_once()
+        self.assertEqual(self.remote.download.call_args.args[0], self.row)
+        self.encoder.assert_called_once()
+        record = self.state.events(self.key)[0]
+        self.assertFalse(record["accepted"])
+        self.assertFalse(record["publication_authorized"])
+        self.assertEqual(record["source_sha256"], self.sha)
+        self.assertEqual(photos.canonical(self.plan), before)
+        self.assertEqual(set(call[0] for call in self.remote.mock_calls), {"root_folder", "current", "download"})
+
+    def test_wrong_id_or_hash_refuses_without_preview(self):
+        self.original["keep_id"] = "wrong"
+        with self.assertRaises(photos.Refusal):
+            self.prepare()
+        self.remote.download.assert_not_called()
+        self.original["keep_id"] = self.row["id"]
+        self.remote.download.side_effect = lambda row, target: target.write_bytes(b"bad")
+        with self.assertRaises(photos.Refusal):
+            self.prepare()
+        self.encoder.assert_not_called()
+        self.assertEqual(self.state.events(self.key), [])
+
+    def test_tampered_preview_or_changed_source_refuses_resume(self):
+        result = self.prepare()
+        preview = Path(result["review_directory"]) / self.webp["key"] / "preview.webp"
+        preview.chmod(0o600)
+        preview.write_bytes(b"changed")
+        with self.assertRaises(photos.Refusal):
+            self.prepare()
+        self.assertEqual(self.encoder.call_count, 1)
+
+    def test_unowned_or_symlink_directory_refuses(self):
+        review = photos.private_dir(self.state.root / f"review-{self.key}")
+        target = review / self.webp["key"]
+        target.symlink_to(self.state.root, target_is_directory=True)
+        with self.assertRaises(photos.Refusal):
+            self.prepare()
+        self.remote.download.assert_not_called()
+
+    def test_changed_remote_source_refuses_before_download(self):
+        self.remote.download.side_effect = photos.Refusal("source changed")
+        with self.assertRaises(photos.Refusal):
+            self.prepare()
+        self.encoder.assert_not_called()
+
+    def test_private_review_real_codec_fixture_preserves_original(self):
+        try:
+            from PIL import Image
+            import pillow_heif  # noqa: F401
+        except ImportError:
+            if photos.os.environ.get("GDM_PHOTOS_REQUIRE_CODECS") == "1":
+                self.fail("required native review codecs unavailable")
+            self.skipTest("optional ambient codecs unavailable")
+        output = io.BytesIO()
+        Image.new("RGB", (3, 2), "red").save(output, format="PNG")
+        data = output.getvalue()
+        sha = hashlib.sha256(data).hexdigest()
+        self.row["size"] = str(len(data))
+        self.row["md5Checksum"] = hashlib.md5(data).hexdigest()
+        self.original["sha256"] = sha
+        self.webp["recipe"]["source_original_sha256"] = sha
+        self.remote.download.side_effect = lambda row, target: target.write_bytes(data)
+        result = photos.prepare_review(self.plan, self.key, self.state, self.remote)
+        directory = Path(result["review_directory"]) / self.webp["key"]
+        self.assertEqual((directory / "original").read_bytes(), data)
+        self.assertEqual(photos.validate_webp(directory / "preview.webp"), {"width": 3, "height": 2})
+
+    def test_private_review_retry_has_fresh_targets_and_failure_does_not_poison_resume(self):
+        targets = []
+        def unavailable(row, target):
+            targets.append(target)
+            target.write_bytes(b"partial")
+            raise photos.RemoteFailure("backend copyid", 5)
+        self.remote.download.side_effect = unavailable
+        with self.assertRaises(photos.RemoteFailure):
+            self.prepare()
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0].parent, targets[1].parent)
+        self.assertEqual(list((self.state.root / f"review-{self.key}").iterdir()), [])
+        attempts = []
+        def recovered(row, target):
+            attempts.append(target)
+            if len(attempts) == 1:
+                raise photos.RemoteFailure("backend copyid", 5)
+            target.write_bytes(b"abc")
+        self.remote.download.side_effect = recovered
+        self.assertEqual(self.prepare()["prepared"], 1)
+        self.assertEqual(len(attempts), 2)
+        self.assertNotEqual(attempts[0].parent, attempts[1].parent)
+        self.prepare()
+        self.assertEqual(len(attempts), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

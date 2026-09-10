@@ -118,10 +118,28 @@ references do not receive an exemption. CSV rotations remain historical notes,
 never encoder instructions. Missing accepted derivatives need orientation
 review before any generated replacement can be published.
 
+For missing derivatives, `just photos prepare-review PLAN_SHA256` prepares
+private review material only. It downloads originals by the manifest's exact
+Drive IDs, checks their fingerprints and original hashes, and creates previews
+with the pinned codec recipe. Sources and previews remain under private photo
+state, outside the SSD corpus, mount and VFS cache. Their journal records bind
+the source and preview bytes without declaring orientation acceptance or
+publication consent. Resume rechecks journal-owned files; unowned or changed
+files require reconciliation, not replacement.
+
+Preparation does not clear the immutable plan's blockers, change historical
+curation, or publish, promote or retire any object. Review the actual previews
+before accepting a derivative. An ambiguous orientation remains a decision,
+not a reason to replay historical rotations or silently accept encoder output.
+
 At warning memory pressure, inspection is limited to the four named root and
 `webp/` copies of these documents, at most 64 KiB each, after checking the SSD
 UUID and non-symlink paths. Critical pressure refuses even these reads. Corpus
 hashing, decoding, builds and mounted writes require normal headroom.
+The operator explicitly waived this memory-pressure gate for the current GFTB
+tranche on 2026-09-10 (TIN-4000 comment
+`d96798ee-85f5-40e7-a83b-0781da41a6cd`). That task-specific exception does not
+waive identity, content, curation, upload-safety or exact retirement approval.
 
 Drive and SSD provenance copies must agree by bytes. A different copy blocks
 publication for an authority decision; modification time does not select a

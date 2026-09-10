@@ -737,7 +737,9 @@ disabled. No builder policy was changed and no combined-shell pass is claimed.
 
 The unique Drive root is `1PI-aLEkshfKv1VtWJGmCPOa3tByTlKjV`, at
 `/Users/jess/GDrive/sulliwood/GFTB Stuff`. Direct inventory listed 444 root
-files and 227 WebPs, not deduplicated counts. The diagnostic planner completed
+files and 227 WebPs, not deduplicated counts. The completed immutable inventory
+later corrected this arithmetic: 445 root files, 227 WebPs and one folder,
+673 entries total. The diagnostic planner completed
 200 rclone operations before `backend copyid` exited 5 with sanitized error
 categories `503`, `timeout` and `failed to copy`. It saved no manifest and
 changed no photos; its private readback directory was cleaned up.
@@ -753,3 +755,44 @@ length is checked after transfer, not claimed as a hard transport cap.
 Apply, verify and retirement retain their existing per-object checks and do
 not acquire automatic mutation retries. These source tests are not a live
 consolidation or mounted-readback acceptance receipt.
+
+## Completed inventory and private review preparation — 2026-09-10
+
+The live planner completed successfully. Its private, mode-0400 manifest is
+`86dfab5ccd9dce29c528a0dc02cc70c84abd7a38dc7d65bb95a096f83c2dc350`;
+the file SHA256 was independently checked. It covers 673 Drive entries
+(672 files and one folder) and 2789 SSD files. The proposed collection has
+365 distinct original/non-photo objects, 363 WebPs, two unchanged curation
+documents and one catalog. Of those WebPs, 227 are already accepted; 136
+require orientation review. The original curation still binds 227 orientation
+records, 40 design records, two restrictions and one placeholder annotation.
+
+The 136 missing derivatives correspond to Drive-only originals
+`IMG_2727.HEIC` through `IMG_2850.HEIC`, plus `IMG_2862.HEIC` through
+`IMG_2873.HEIC`. Their distinct original hashes do not overlap the 227
+accepted-output groups. No historical orientation, selection or restriction
+records cover them. Their source bytes total 284141472 bytes. They must not
+be silently declared accepted or cleared for public use.
+
+The inventory identifies 82 byte-verified Drive duplicate originals and 458
+local canonical-byte retirement candidates. Another 2320 SSD files contain
+1926 distinct hashes: 394 duplicate pairs within this historical set and 1532
+files with no other local hash match. They total 6235937627 bytes and include
+unique Python/JSON artifacts. Archiving this historical work would be a
+separate, exact-manifest-approved recoverable relocation, not a claim that all
+of it is redundant. No archive or retirement has occurred.
+
+The new `photos prepare-review DIGEST` command prepares private evidence
+without requiring publication authority. It preserves the source manifest's
+blockers and historical curation, verifies exact Drive IDs/fingerprints and
+source SHA256/length, and generates previews with the pinned codec recipe.
+Private per-attempt directories isolate download failures; one read-only
+exit-5 retry uses a new directory. Atomic no-replace directory publication
+and journal-bound source/preview hashes make successful preparation resumable.
+Unowned final targets still require reconciliation. The journal explicitly
+records `accepted: false` and `publication_authorized: false`.
+
+Independent source review approved the private preparation boundary. The
+native registered photo suite passed 172 tests with zero skips, including
+real codec preparation and retry/resume safety cases. This source receipt
+does not claim that new outputs have been reviewed, published or retired.

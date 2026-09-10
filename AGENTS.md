@@ -38,6 +38,10 @@ target — see `docs/position.md`.
    `orientation-judged.csv` and `design-picks.md` sidecars, each at most 64 KiB,
    after SSD identity and non-symlink path checks. Critical pressure refuses;
    corpus hashing, codecs, builds and mount writes require normal headroom.
+   Operator exception (2026-09-10): do not impose this memory-pressure gate on
+   the current GFTB tranche. TIN-4000 comment
+   `d96798ee-85f5-40e7-a83b-0781da41a6cd` records the explicit direction; all
+   identity, content, curation, upload-safety and retirement controls remain.
 10. This lane prepares Neo closure/runtime/recovery readiness. Before any live
     recovery, qualify supervision controls on a disposable service. One
     attended, non-forcing attempt with writers paused and cache/config
