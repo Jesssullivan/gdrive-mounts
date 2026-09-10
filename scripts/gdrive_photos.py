@@ -938,17 +938,80 @@ def alias_candidates(plan, reference):
     return sorted(matches)
 
 
-def make_plan(source_root, mount_point, remote, validator=validate_webp, *, require_curation=False):
+def prior_payload_evidence(plan, plan_digest):
+    """Extract immutable prior readback evidence, never manufacture it from metadata."""
+    if (not isinstance(plan_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", plan_digest)
+            or digest(plan) != plan_digest):
+        raise Refusal("prior readback plan digest differs")
+    validate_alias_bindings(plan)
+    inventory = {}
+    for row in plan["remote_inventory"]:
+        identifier = row.get("id")
+        if not isinstance(identifier, str) or not identifier or identifier in inventory:
+            raise Refusal("prior readback inventory has ambiguous IDs")
+        inventory[identifier] = row
+    hashes = {}
+    def bind(identifier, sha):
+        if identifier is None or sha is None:
+            return
+        if (identifier not in inventory or not isinstance(sha, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", sha)):
+            raise Refusal("prior payload evidence is malformed")
+        if identifier in hashes and hashes[identifier] != sha:
+            raise Refusal("prior payload evidence conflicts for one Drive ID")
+        hashes[identifier] = sha
+    for entry in plan["entries"]:
+        bind(entry.get("keep_id"), entry.get("sha256"))
+    for item in plan["retirement"]:
+        row = item["row"]
+        if inventory.get(row.get("id")) != row:
+            raise Refusal("prior retirement row differs from readback inventory")
+        bind(row["id"], item["sha256"])
+    return inventory, hashes
+
+
+def reusable_payload_sha(row, prior_rows, prior_hashes):
+    identifier = row.get("id")
+    if not isinstance(identifier, str) or prior_rows.get(identifier) != row:
+        return None
+    # Require complete unchanged fingerprints, not just a matching advertised hash.
+    if any(not isinstance(row.get(field), str) or not row[field]
+           for field in ("id", "parent", "path", "name", "mimeType", "modifiedTime")):
+        return None
+    if (not isinstance(row.get("size"), str) or not re.fullmatch(r"[0-9]+", row["size"])
+            or not isinstance(row.get("md5Checksum"), str)
+            or not re.fullmatch(r"[a-fA-F0-9]{32}", row["md5Checksum"])
+            or not isinstance(row.get("sha256Checksum"), str)
+            or not re.fullmatch(r"[a-fA-F0-9]{64}", row["sha256Checksum"])):
+        return None
+    known = prior_hashes.get(identifier)
+    return known if known is not None and row["sha256Checksum"].lower() == known else None
+
+
+def make_plan(source_root, mount_point, remote, validator=validate_webp, *, require_curation=False,
+              reuse_plan=None, reuse_plan_digest=None):
     """Inventory a whole collection; the operator CLI always requires curation.
 
     The default retains the pre-catalog API for legacy safety fixtures. There
     is deliberately no command-line switch to publish a new uncurated plan.
     """
+    prior_rows, prior_hashes, reused = {}, {}, 0
+    if reuse_plan is not None:
+        prior_rows, prior_hashes = prior_payload_evidence(reuse_plan, reuse_plan_digest)
+        if (reuse_plan.get("org") != ORG or type(reuse_plan.get("version")) is not int
+                or reuse_plan.get("version") != 1
+                or reuse_plan.get("source_root") != str(Path(source_root).absolute())
+                or reuse_plan.get("mount_point") != str(Path(mount_point).absolute())):
+            raise Refusal("prior readback plan roots differ")
+    elif reuse_plan_digest is not None:
+        raise Refusal("prior readback digest requires its immutable plan")
     source_root = Path(source_root)
     local = local_inventory(source_root)
     if not any(p.startswith("originals/") for p in local):
         raise Refusal("SSD corpus has no staged originals")
     root_id = remote.root_folder()
+    if reuse_plan is not None and reuse_plan.get("drive_root_id") != root_id:
+        raise Refusal("prior readback Drive root differs")
     inventory = remote.inventory(root_id)
     identifiers = [row.get("id") for row in inventory]
     if any(not isinstance(identifier, str) or not identifier for identifier in identifiers) or len(set(identifiers)) != len(identifiers):
@@ -972,7 +1035,12 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp, *, requ
         remote_bytes += int(row.get("size") or 0)
         if remote_bytes > MAX_BYTES:
             raise Refusal("Drive corpus exceeds the bounded readback byte budget")
-        hashes[row["id"]] = getattr(remote, "planning_sha256", remote.sha256)(row)
+        reused_sha = reusable_payload_sha(row, prior_rows, prior_hashes)
+        if reused_sha is None:
+            hashes[row["id"]] = getattr(remote, "planning_sha256", remote.sha256)(row)
+        else:
+            hashes[row["id"]] = reused_sha
+            reused += 1
     originals = [r for r in files if not r["path"].startswith("webp/") and r["id"] in hashes
                  and not (require_curation and r["path"].casefold() in CURATION_PATHS)]
     blockers = []
@@ -1142,6 +1210,8 @@ def make_plan(source_root, mount_point, remote, validator=validate_webp, *, requ
             "local_retirement": local_retirement, "unresolved": unresolved,
             "warnings": warnings, "blockers": blockers}
     plan["alias_bindings_version"] = 1
+    if reuse_plan is not None:
+        plan["readback_reuse"] = {"source_plan_digest": reuse_plan_digest, "reused_objects": reused}
     plan["alias_bindings"] = _derive_alias_bindings(plan)
     if require_curation:
         attach_curation(plan, source_root)
@@ -2117,12 +2187,15 @@ def main(argv=None):
     parser.add_argument("--review-digest", help="immutable private collection review decision digest")
     parser.add_argument("--entry-key", help="exact missing-derivative key for private correction")
     parser.add_argument("--clockwise-degrees", type=int, help="explicit additional clockwise rotation")
+    parser.add_argument("--reuse-plan-digest", help="reuse unchanged advertised SHA256 with prior payload-verified evidence")
     parser.add_argument("--settings", default=str(Path.home() / ".local/state/gdrive-mounts/effective-settings.json"))
     parser.add_argument("--state-dir")
     parser.add_argument("--mounted-readback", action="store_true",
                         help="verify every canonical payload through the mount after approved retirement")
     args = parser.parse_args(argv)
     try:
+        if args.reuse_plan_digest and args.command != "plan":
+            raise Refusal("--reuse-plan-digest is only valid with plan")
         if args.mounted_readback and args.command != "verify":
             raise Refusal("--mounted-readback is only valid with verify")
         point, runtime, private, sock = configuration(args.settings, args.state_dir)
@@ -2132,7 +2205,9 @@ def main(argv=None):
             if args.command == "plan":
                 if args.plan_digest:
                     raise Refusal("plan does not accept an existing digest")
-                plan = make_plan(SSD_ROOT, point, remote, require_curation=True)
+                prior = state.load(args.reuse_plan_digest) if args.reuse_plan_digest else None
+                plan = make_plan(SSD_ROOT, point, remote, require_curation=True,
+                                 reuse_plan=prior, reuse_plan_digest=args.reuse_plan_digest)
                 key = state.save(plan)
                 result = {"plan": key, "entries": len(plan["entries"]),
                           "retirement_candidates": len(plan["retirement"]), "warning_count": len(plan["warnings"]),

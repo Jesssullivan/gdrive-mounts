@@ -849,3 +849,37 @@ passed photo tests but hit three five-second startup timeouts in maintenance
 fixtures using the ambient profile Python. The successful run used the pinned
 native Python consistently in PATH; no test limit or assertion was relaxed.
 Live SSD adoption and Drive publication are not claimed by this receipt.
+
+### Verified SSD adoption and blocker-free replan — 2026-09-10
+
+Live adoption exited successfully with 272 new SSD files: 136 preserved
+originals and 136 accepted WebPs. Independent read-only audit matched every
+new file's journal inode/device/size/SHA256 and accepted source/output hash.
+The existing 227 originals, 227 WebPs and four curation sidecars remain
+byte-identical. No staging residuals were found in the bounded root,
+`originals/` and `webp/` inspection. TIN-4000 comment
+`19ac5b04-6185-4189-8d8c-5875c26d2bfb` records that actual data result.
+
+All 672 Drive payloads advertise SHA-256 and already had independent download
+proof in the old immutable plan. The redundant read-only replanner was stopped
+with SIGINT to its exact verified Python worker; it exited 130 without saving
+a new plan. The live mount process was not signaled. The new optional
+`plan --reuse-plan-digest` path reuses payload evidence only when fresh Drive
+rows match in full and their advertised SHA-256 equals the prior verified
+payload hash. Changed or incomplete evidence uses ordinary readback. Fresh
+root and full-inventory checks remain mandatory before and after planning;
+mutation-phase verification is unchanged.
+
+Independent source review approved that boundary. Registered `just check`
+passed with 194 native photo tests and zero skips, 49 maintenance tests,
+40 shell assertions and all other gates, using the pinned native environment.
+
+The resulting immutable plan is
+`479633d22fb1d4de45790398dbf8f0fb05374c8d7d827bc5bbdddeca0bc8ec15`:
+zero blockers or warnings; 731 entries (365 original/nonphoto objects,
+363 WebPs, two provenance documents and one catalog); 141 new uploads and
+zero renames. All 672 prior payload proofs matched fresh Drive evidence.
+Retirement proposes 82 Drive copies and 730 local canonical-byte files.
+The 2320 historical SSD files remain preserved and unresolved. No retirement
+approval is inferred from acceptance, planning or source merge. Drive
+publication, independent verification and final mounted readback remain.

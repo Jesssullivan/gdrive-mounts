@@ -158,6 +158,16 @@ and refused. Resume only the same review digest with unchanged evidence.
 After adoption, run `plan` to produce a new immutable whole-collection plan.
 Neither review nor adoption edits the old plan or authorizes retirement.
 
+For a local-staging-only change, `just photos plan --reuse-plan-digest
+PRIOR_PLAN_SHA256` can reuse the prior plan's downloaded content proof.
+Reuse requires the fresh Drive row to match the prior row exactly, including
+ID, parent, path, size, modification time and checksums, and requires the
+fresh advertised SHA-256 to match the previously verified payload hash.
+Missing or changed evidence falls back to a new download. Planning still
+checks the fresh root and complete inventory before and after; the new
+immutable plan records its source proof digest and reuse count. Publication,
+retirement and verification retain their independent mutation-phase checks.
+
 At warning memory pressure, inspection is limited to the four named root and
 `webp/` copies of these documents, at most 64 KiB each, after checking the SSD
 UUID and non-symlink paths. Critical pressure refuses even these reads. Corpus
