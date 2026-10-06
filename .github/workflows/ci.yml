@@ -22,6 +22,6 @@ concurrency:
 # //:ci_validation_suite.
 jobs:
   check:
-    uses: tinyland-inc/ci-templates/.github/workflows/spoke-ci-v4.yml@32e39ced0008edf4564ebeb173a5e8fbf069e28f # v5.1.0
+    uses: xoxd-ai/ci-templates/.github/workflows/spoke-ci-v4.yml@ae836d8400d5784d74af4fecc020f225d1c2d08e # v5.1.1
     with:
       action_name: check

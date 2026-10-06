@@ -19,8 +19,8 @@ just photos --help                   # manifest-bound GFTB consolidation (option
 ## CI
 
 One lane: GloriousFlywheel v4. `.github/workflows/ci.yml` is a thin caller into
-`tinyland-inc/ci-templates`' `spoke-ci-v4.yml` (pinned at
-`32e39ced0008edf4564ebeb173a5e8fbf069e28f`, v5.1.0) and submits the single
+`xoxd-ai/ci-templates`' `spoke-ci-v4.yml` (pinned at
+`ae836d8400d5784d74af4fecc020f225d1c2d08e`, v5.1.1) and submits the single
 action declared in `.github/lanes.json` — `test //:ci_validation_suite`,
 capability `rbe-linux-x86_64`, result `status-only`. Every gate lives in that
 Bazel suite; there is no hosted runner lane and no fallback.

@@ -33,9 +33,9 @@ this repo's `flake.nix`. No brew delivery for any part of this stack.
 ## CI posture — GloriousFlywheel v4 only, and it does not run yet
 
 CI here is one thing: the v4 action fabric. `.github/workflows/ci.yml` is a
-thin caller into `tinyland-inc/ci-templates`
+thin caller into `xoxd-ai/ci-templates`
 `.github/workflows/spoke-ci-v4.yml`, pinned at
-`32e39ced0008edf4564ebeb173a5e8fbf069e28f` (v5.1.0). It submits exactly one
+`ae836d8400d5784d74af4fecc020f225d1c2d08e` (v5.1.1). It submits exactly one
 action — `check`, declared in `.github/lanes.json` as
 `test //:ci_validation_suite`, capability `rbe-linux-x86_64`, result
 `status-only`. Every gate this repo enforces is a registered Bazel target in
