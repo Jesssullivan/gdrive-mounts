@@ -69,7 +69,7 @@ target — see `docs/position.md`.
 | Linear project, draft issues → filed IDs | `docs/tracker.md` |
 | Writing style | `docs/STYLE.md` |
 | Dated receipts (bakeoffs, acceptance runs) | `docs/evidence/` |
-| The command surface | `justfile` — bare `just` lists recipes; `just doctor` is the agent cold-landing surface; `just check` runs the local gates; `just check-ci` runs `bazelisk test //:ci_validation_suite`, the exact action CI submits |
+| The command surface | `justfile` — bare `just` lists recipes; `just doctor` is the agent cold-landing surface; `just check` runs the local gates; `just check-ci` runs `bazelisk test //:ci_validation_suite`, the action CI submits, on this host (local, non-qualifying) |
 
 ## House-pattern sources
 
@@ -96,7 +96,7 @@ here), prompt-toon (agent-output shaping conventions).
 | Gate | Command |
 |---|---|
 | Local everything | `nix develop --command just check` |
-| The exact action CI submits | `just check-ci` |
+| The action CI submits, run locally (non-qualifying) | `just check-ci` |
 | Schema/render validation | `just validate` |
 | Secrets scan | `just secrets-scan-dir` |
 | Endpoint-free doctrine | `just endpoint-free-check` |

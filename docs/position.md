@@ -75,7 +75,8 @@ Retired with the hosted lanes, so nobody re-derives them from history:
 
 Local verification is unchanged and is the operator's real gate until the
 fabric can run: `nix develop --command just check` for the day-to-day pass,
-`nix develop --command just check-ci` for the exact suite v4 would submit.
+`nix develop --command just check-ci` for the suite v4 would submit, run on
+this host. That run is local and non-qualifying (TIN-5770 R471).
 
 ## sting posture
 
