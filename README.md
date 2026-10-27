@@ -31,8 +31,8 @@ owner-overlay runner set and GloriousFlywheel admits organizations only
 account — cannot own one, and no `gf-v4-dispatch` runner answers this repo. It
 stays that way until an organization is chosen and its owner ceremony lands.
 `docs/position.md` carries the full posture. `nix develop --command just check`
-is the operator gate meanwhile; `just check-ci` runs the suite v4 submits on this host. Its result is local
-and non-qualifying (TIN-5770 R471).
+is the operator gate meanwhile; `just check-ci` runs the suite v4 submits on
+this host. Its result is local and non-qualifying (TIN-5770 R471).
 
 ## Architecture
 

@@ -69,7 +69,7 @@ target — see `docs/position.md`.
 | Linear project, draft issues → filed IDs | `docs/tracker.md` |
 | Writing style | `docs/STYLE.md` |
 | Dated receipts (bakeoffs, acceptance runs) | `docs/evidence/` |
-| The command surface | `justfile` — bare `just` lists recipes; `just doctor` is the agent cold-landing surface; `just check` runs the local gates; `just check-ci` runs `bazelisk test //:ci_validation_suite`, the action CI submits, on this host (local, non-qualifying) |
+| The command surface | `justfile`: bare `just` lists recipes; `just doctor` is the agent cold-landing surface; `just check` runs the local gates; `just check-ci` runs `bazelisk test //:ci_validation_suite`, the action CI submits, on this host (local, non-qualifying) |
 
 ## House-pattern sources
 
