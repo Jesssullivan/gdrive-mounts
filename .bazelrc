@@ -1,6 +1,11 @@
 # gdrive-mounts .bazelrc — bzlmod-only, endpoint-free by doctrine.
 common --enable_bzlmod
 common --noenable_workspace
+
+# Bound the Bazel client server (TIN-5770 R470): an idle server exits after
+# 120 s, not the 3 h default. A ~/.bazelrc startup flag is read after this
+# file and still wins on that host.
+startup --max_idle_secs=120
 build --verbose_failures
 test --test_output=errors
 

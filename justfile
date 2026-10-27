@@ -13,9 +13,12 @@ default:
 # Every gate that runs without a build slot. This is the day-to-day gate.
 check: validate test-lib test-photos test-maintenance secrets-scan-dir endpoint-free-check repo-manifest-validate hm-eval workflow-validate
 
-# The exact action .github/lanes.json declares and the v4 fabric submits.
-# Nothing else is CI: there is no hosted lane.
+# Runs the target .github/lanes.json declares, on this host. Local,
+# non-qualifying (TIN-5770 R471): only the v4 submit from
+# .github/workflows/ci.yml qualifies, and this repo has no developer submit
+# path yet. Nothing else is CI: there is no hosted lane.
 check-ci:
+    @echo "[check-ci] local, non-qualifying: //:ci_validation_suite on this host"
     bazelisk test //:ci_validation_suite
 
 # Validate orgs.json, the nix settings SSOT, and the render pipeline (dummy secrets).
@@ -71,12 +74,14 @@ hm-eval-build:
 
 # ── Bazel graph ─────────────────────────────────────────────────────────────
 
-# Run the bazel test graph (the shell gates, under bazel).
+# Run the bazel test graph (the shell gates, under bazel). Local, non-qualifying.
 bazel-test:
+    @echo "[bazel-test] local, non-qualifying"
     bazelisk test //...
 
-# Build the bazel graph without running it.
+# Build the bazel graph without running it. Local, non-qualifying.
 bazel-validate:
+    @echo "[bazel-validate] local, non-qualifying"
     bazelisk build //...
 
 # ── Runtime lanes (operator-invoked; real secrets, never printed) ───────────
